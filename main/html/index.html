@@ -1,0 +1,834 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BLESPlo.it</title>
+  <link rel="stylesheet" href="static/common.css">
+  <link rel="icon" type="image/svg+xml" href="/static/logo.svg">
+  <style>
+    :root {
+      --nav-h: 48px;
+      --nav-bg: var(--color-nav-bg);
+      --nav-border: var(--color-nav-border);
+      --pill-scan: #27ae60;
+      --pill-central: #8e44ad;
+      --pill-periph: #e67e22;
+      --pill-off: #636e72;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: var(--color-surface-wash);
+      min-height: 100vh;
+      padding-left: 0;
+      padding-right: 0;
+      padding-bottom: 0;
+      padding-top: var(--nav-h);
+    }
+
+    /* ── Navbar ── */
+    #topnav {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      height: var(--nav-h);
+      background: var(--nav-bg);
+      border-bottom: 1px solid var(--nav-border);
+      display: flex;
+      align-items: center;
+      padding: 0 14px;
+      gap: 6px;
+      z-index: 1000;
+      box-shadow: 0 2px 8px rgba(0,0,0,.35);
+    }
+
+    .logo {
+      font-weight: 700;
+      font-size: 15px;
+      color: #fff;
+      letter-spacing: .5px;
+      white-space: nowrap;
+      margin-right: 8px;
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      text-decoration: none;
+    }
+
+    .nav-links {
+      display: flex;
+      gap: 2px;
+      align-items: center;
+      flex: 1;
+      overflow-x: auto;
+      scrollbar-width: none;
+    }
+    .nav-links::-webkit-scrollbar { display: none; }
+
+    a.nav-link {
+      color: #adb5bd;
+      text-decoration: none;
+      padding: 5px 10px;
+      border-radius: 5px;
+      font-size: 13px;
+      font-weight: 500;
+      white-space: nowrap;
+      transition: background .15s, color .15s;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+    a.nav-link:hover { background: rgba(255,255,255,.10); color: #fff; }
+    a.nav-link.active { background: rgba(0,110,171,.40); color: #a8d8f0; }
+
+    /* ── Status pills ── */
+    .status-pills {
+      display: flex;
+      gap: 5px;
+      align-items: center;
+      margin-left: auto;
+      flex-shrink: 0;
+    }
+    .status-pill {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 3px 8px 3px 5px;
+      border-radius: 20px;
+      font-size: 11px;
+      font-weight: 600;
+      white-space: nowrap;
+      background: rgba(255,255,255,.07);
+      color: #adb5bd;
+      transition: background .3s, color .3s;
+      cursor: pointer;
+      border: none;
+      outline: none;
+    }
+    .status-pill .dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: var(--pill-off);
+      transition: background .3s;
+      flex-shrink: 0;
+    }
+    .status-pill.active-scan    { background: rgba(39,174,96,.15);  color: #55efc4; }
+    .status-pill.active-scan .dot    { background: var(--pill-scan);
+                                       box-shadow: 0 0 6px var(--pill-scan); }
+    .status-pill.active-central { background: rgba(142,68,173,.18); color: #c39bd3; }
+    .status-pill.active-central .dot { background: var(--pill-central);
+                                       box-shadow: 0 0 6px var(--pill-central); }
+    .status-pill.active-periph  { background: rgba(230,126,34,.18); color: #f0b07a; }
+    .status-pill.active-periph .dot  { background: var(--pill-periph);
+                                       box-shadow: 0 0 6px var(--pill-periph); }
+
+    #navWsStatus {
+      font-size: 11px;
+      padding: 3px 7px;
+      border-radius: 10px;
+      background: rgba(100,116,139,.28);
+      color: #cbd5e1;
+      font-weight: 600;
+      flex-shrink: 0;
+    }
+    #navWsStatus.ws-on { background: rgba(39,174,96,.15); color: #55efc4; }
+
+    /* ── Home dashboard ── */
+    #page-home { padding: 28px 20px 40px; max-width: 820px; margin: 0 auto; }
+    #page-home h2 { font-size: 22px; color: var(--color-text-heading); margin-bottom: 6px; }
+    #page-home p.sub { color: var(--color-text-muted); font-size: 14px; margin-bottom: 24px; }
+
+    .home-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+      gap: 14px;
+    }
+    .home-card {
+      background: #fff;
+      border-radius: 10px;
+      padding: 18px 16px 16px;
+      box-shadow: 0 2px 8px rgba(0,0,0,.07);
+      border: 1px solid var(--color-border);
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      transition: transform .15s, box-shadow .15s;
+    }
+    .home-card:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,0,0,.10); }
+    .home-card .card-icon { font-size: 26px; line-height: 1; }
+    .home-card .card-title { font-weight: 600; font-size: 15px; color: var(--color-text-heading); }
+    .home-card .card-desc { font-size: 12px; color: var(--color-text-muted); line-height: 1.5; }
+
+    /* ── Auto-redirect banner ── */
+    #auto-redirect-banner {
+      display: none;
+      margin: 0 0 18px;
+      padding: 10px 14px;
+      background: rgba(0,110,171,.10);
+      border: 1px solid rgba(76,150,203,.45);
+      border-radius: 8px;
+      font-size: 13px;
+      color: var(--color-text-heading);
+      align-items: center;
+      gap: 10px;
+    }
+    #auto-redirect-banner.visible { display: flex; }
+    #auto-redirect-banner .banner-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: var(--color-brand);
+      box-shadow: 0 0 6px var(--color-brand-accent);
+      flex-shrink: 0;
+      animation: blink 1s infinite;
+    }
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
+    #auto-redirect-banner a {
+      color: var(--color-brand-hover); font-weight: 600; cursor: pointer; text-decoration: underline;
+    }
+
+    /* ── Pages & iframes ── */
+    .page-content, .page-frame { display: none; }
+    .page-content.active { display: block; }
+    .page-frame.active {
+      display: block;
+      height: calc(100vh - var(--nav-h));
+      margin: 0; padding: 0; overflow: hidden;
+    }
+    .page-frame iframe { width: 100%; height: 100%; border: none; display: block; }
+
+    /* ── WiFi restart info popup ── */
+    #wifiRestartInfo {
+      display: none;
+      position: fixed;
+      inset: 0;
+      z-index: 3000;
+      background: rgba(0,0,0,.60);
+      align-items: center;
+      justify-content: center;
+    }
+    #wifiRestartInfo.visible { display: flex; }
+    #wifiRestartInfo .ri-box {
+      background: #fff;
+      border-radius: 12px;
+      width: 380px;
+      max-width: 95vw;
+      box-shadow: 0 8px 32px rgba(0,0,0,.35);
+      overflow: hidden;
+    }
+    #wifiRestartInfo .ri-head {
+      background: var(--color-nav-bg);
+      color: #fff;
+      padding: 14px 20px;
+      font-weight: 700;
+      font-size: 15px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    #wifiRestartInfo .ri-body {
+      padding: 20px;
+      font-size: 13px;
+      color: #333;
+      line-height: 1.6;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    #wifiRestartInfo .ri-step {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      padding: 10px 12px;
+      border-radius: 8px;
+      background: #f4f6f7;
+      border-left: 3px solid var(--color-brand);
+    }
+    #wifiRestartInfo .ri-step .ri-icon { font-size: 18px; flex-shrink: 0; line-height: 1.4; }
+    #wifiRestartInfo .ri-step.ok  { border-left-color: #27ae60; }
+    #wifiRestartInfo .ri-step.err { border-left-color: #c0392b; }
+    #wifiRestartInfo .ri-footer {
+      display: flex;
+      justify-content: flex-end;
+      padding: 0 20px 16px;
+    }
+
+    /* ── Mobile ── */
+    #hamburger {
+      display: none;
+      background: none;
+      border: none;
+      cursor: pointer;
+      padding: 5px;
+      color: #adb5bd;
+      margin-left: 6px;
+    }
+    @media (max-width: 600px) {
+      #hamburger { display: flex; }
+      .nav-links {
+        display: none;
+        position: absolute;
+        top: var(--nav-h); left: 0; right: 0;
+        background: var(--nav-bg);
+        flex-direction: column;
+        align-items: stretch;
+        padding: 8px;
+        gap: 2px;
+        border-bottom: 1px solid var(--nav-border);
+        box-shadow: 0 4px 12px rgba(0,0,0,.3);
+        z-index: 999;
+      }
+      .nav-links.open { display: flex; }
+      a.nav-link { padding: 9px 12px; }
+      .status-pills { display: none; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ═══ TOP NAV ═══ -->
+<nav id="topnav">
+
+  <a href="#home" class="logo" onclick="navigate('home'); return false;">
+    <img src="/static/logo.svg" width="22" height="22" alt="B" style="display:block">
+    BLESPlo.it
+  </a>
+
+  <div class="nav-links" id="navLinks">
+    <a href="#home"    class="nav-link active" data-page="home"    onclick="navigate('home');    return false;">🏠 Home</a>
+    <a href="#scan"    class="nav-link"        data-page="scan"    onclick="navigate('scan');    return false;">🔍 Scanner</a>
+    <a href="#devices" class="nav-link"        data-page="devices" onclick="navigate('devices'); return false;">📋 Devices</a>
+    <a href="#files"   class="nav-link"        data-page="files"   onclick="navigate('files');   return false;">🗂️ Files</a>
+    <a href="#settings" class="nav-link" data-page="settings" onclick="openWifiModal(); return false;">⚙ Wifi settings</a>
+    <a href="#" class="nav-link" onclick="confirmReboot(); return false;" title="Reboot ESP32">🔄 Reboot</a>
+
+  </div>
+
+  <div class="status-pills">
+    <!-- clicking an active pill navigates to the relevant sub-page -->
+    <button class="status-pill" id="pillScan"    onclick="pillClick('scan')"   title="Scanner status">   <span class="dot"></span>Scan    </button>
+    <button class="status-pill" id="pillCentral" onclick="pillClick('central')" title="Central status">  <span class="dot"></span>Central </button>
+    <button class="status-pill" id="pillPeriph"  onclick="pillClick('periph')"  title="Peripheral status"><span class="dot"></span>Periph  </button>
+  </div>
+
+  <span id="navWsStatus">WS Off</span>
+
+  <button id="hamburger" aria-label="Toggle menu"
+          onclick="document.getElementById('navLinks').classList.toggle('open')">
+    <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+      <rect y="3"  width="20" height="2" rx="1"/>
+      <rect y="9"  width="20" height="2" rx="1"/>
+      <rect y="15" width="20" height="2" rx="1"/>
+    </svg>
+  </button>
+</nav>
+
+
+<!-- ═══ HOME DASHBOARD ═══ -->
+<div id="page-home" class="page-content active">
+  <h2>BLESPlo.it Dashboard</h2>
+  <p class="sub">Limited interface (more options available via mobile app)</p>
+
+  <!-- Auto-redirect banner shown when a mode is active -->
+  <div id="auto-redirect-banner">
+    <span class="banner-dot"></span>
+    <span id="auto-redirect-msg">Active session detected. </span>
+    <a onclick="doAutoRedirect()">Go there now</a>
+  </div>
+
+  <div class="home-grid">
+    <div class="home-card" onclick="navigate('scan')">
+      <div class="card-icon">🔍</div>
+      <div class="card-title">Scanner</div>
+      <div class="card-desc">Discover nearby BLE devices, inspect advertising data and connect.</div>
+    </div>
+    <div class="home-card" onclick="navigate('devices')">
+      <div class="card-icon">📋</div>
+      <div class="card-title">Devices</div>
+      <div class="card-desc">Browse saved device profiles, start simulations or open the editor.</div>
+    </div>
+    <div class="home-card" onclick="navigate('files')">
+      <div class="card-icon">🗂️</div>
+      <div class="card-title">File Manager</div>
+      <div class="card-desc">Browse and manage files on the ESP32 filesystem.</div>
+    </div>
+  </div>
+</div>
+
+
+<!-- ═══ IFRAME PAGES (lazy-loaded) ═══ -->
+<div id="page-scan"    class="page-frame"><iframe id="frame-scan"    title="Scanner"></iframe></div>
+<div id="page-central" class="page-frame"><iframe id="frame-central" title="Central"></iframe></div>
+<div id="page-devices" class="page-frame"><iframe id="frame-devices" title="Devices"></iframe></div>
+<div id="page-sim"     class="page-frame"><iframe id="frame-sim"     title="Simulator"></iframe></div>
+<div id="page-edit"    class="page-frame"><iframe id="frame-edit"    title="Editor"></iframe></div>
+<div id="page-files"   class="page-frame"><iframe id="frame-files"   title="File Manager"></iframe></div>
+
+
+<div id="wifiModal" style="display:none;position:fixed;inset:0;z-index:2000;
+     background:rgba(0,0,0,.55);align-items:center;justify-content:center;">
+  <div style="background:#fff;border-radius:12px;width:420px;max-width:95vw;
+              box-shadow:0 8px 32px rgba(0,0,0,.35);overflow:hidden;">
+    <div style="background:#063049;color:#fff;padding:16px 20px;font-weight:700;
+                font-size:15px;display:flex;justify-content:space-between;align-items:center;">
+      <span>📶 WiFi Settings</span>
+      <button onclick="closeWifiModal()"
+        style="background:none;border:none;color:#fff;font-size:22px;cursor:pointer;line-height:1;">×</button>
+    </div>
+    <div style="padding:20px;display:flex;flex-direction:column;gap:14px;">
+      <div id="wifiCurrentSsid" style="font-size:13px;color:#555;background:#f8f8f8;
+           padding:8px 12px;border-radius:6px;border:1px solid #eee;">
+        Loading current SSID…
+      </div>
+      <label style="font-size:13px;font-weight:600;color:#333;">
+        Preferred Wi‑Fi mode
+        <select id="wifiMode"
+          style="display:block;width:100%;margin-top:4px;padding:8px 10px;border:1px solid #ccc;
+                 border-radius:6px;font-size:14px;box-sizing:border-box;background:#fff;">
+          <option value="sta_first">STA first (try saved network, then soft‑AP fallback)</option>
+          <option value="ap_only">AP only (never join STA; soft‑AP always)</option>
+        </select>
+      </label>
+      <p style="font-size:12px;color:#64748b;margin:0;line-height:1.45;">
+        STA-first uses your soft‑AP SSID/password below when falling back after a failed join.
+      </p>
+      <label style="font-size:13px;font-weight:600;color:#333;">
+        STA network name (note: only 2.4GHz supported)
+        <input id="wifiSsid" type="text" maxlength="63" placeholder="Network name"
+          style="display:block;width:100%;margin-top:4px;padding:8px 10px;border:1px solid #ccc;
+                 border-radius:6px;font-size:14px;box-sizing:border-box;">
+      </label>
+      <label style="font-size:13px;font-weight:600;color:#333;">
+        STA password
+        <div style="display:flex;gap:6px;margin-top:4px;">
+          <input id="wifiPsk" type="password" maxlength="63" placeholder="Leave empty to keep current"
+            style="flex:1;padding:8px 10px;border:1px solid #ccc;border-radius:6px;
+                   font-size:14px;box-sizing:border-box;">
+          <button onclick="togglePskVisibility()"
+            style="padding:8px 10px;border:1px solid #ccc;border-radius:6px;
+                   background:#f5f5f5;cursor:pointer;font-size:13px;">👁</button>
+        </div>
+      </label>
+      <div style="border-top:1px solid #eee;margin:4px 0 2px;padding-top:12px;font-size:12px;font-weight:700;color:#063049;">
+        Soft‑AP (fallback / AP-only mode)
+      </div>
+      <label style="font-size:13px;font-weight:600;color:#333;">
+        AP SSID override
+        <input id="wifiApSsid" type="text" maxlength="32"
+          placeholder="Empty = default BLESPLO.it + MAC suffix"
+          style="display:block;width:100%;margin-top:4px;padding:8px 10px;border:1px solid #ccc;
+                 border-radius:6px;font-size:14px;box-sizing:border-box;">
+      </label>
+      <label style="font-size:13px;font-weight:600;color:#333;">
+        AP password
+        <div style="display:flex;gap:6px;margin-top:4px;">
+          <input id="wifiApPsk" type="password" maxlength="63" placeholder="Leave empty to keep current"
+            style="flex:1;padding:8px 10px;border:1px solid #ccc;border-radius:6px;
+                   font-size:14px;box-sizing:border-box;">
+          <button type="button" onclick="toggleWifiApPskVisibility()"
+            style="padding:8px 10px;border:1px solid #ccc;border-radius:6px;
+                   background:#f5f5f5;cursor:pointer;font-size:13px;">👁</button>
+        </div>
+      </label>
+      <label style="font-size:13px;font-weight:500;color:#444;display:flex;align-items:center;gap:8px;cursor:pointer;">
+        <input type="checkbox" id="wifiApPskClear" style="width:16px;height:16px;">
+        Reset AP password to firmware default on save
+      </label>
+      <div id="wifiStatus" style="font-size:12px;min-height:18px;color:#64748b;"></div>
+      <div style="display:flex;gap:10px;justify-content:flex-end;">
+        <button onclick="closeWifiModal()"
+          style="padding:9px 18px;border:1px solid #ccc;border-radius:6px;
+                 background:#f5f5f5;cursor:pointer;font-size:13px;">Cancel</button>
+      <button onclick="saveWifi()"
+          style="padding:9px 18px;border:1px solid #006EAB;border-radius:6px;
+                 background:#fff;color:#006EAB;cursor:pointer;font-size:13px;font-weight:600;">
+          Save
+        </button>
+        <button onclick="saveWifiAndReboot()"
+          style="padding:9px 18px;border:none;border-radius:6px;
+                 background:#006EAB;color:#fff;cursor:pointer;font-size:13px;font-weight:600;">
+          Save &amp; Reboot
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ WiFi RESTART INFO POPUP ═══ -->
+<div id="wifiRestartInfo">
+  <div class="ri-box">
+    <div class="ri-head">
+      <span>📶 What happens after restart?</span>
+      <button onclick="closeWifiRestartInfo()"
+        style="background:none;border:none;color:#fff;font-size:22px;cursor:pointer;line-height:1;">×</button>
+    </div>
+    <div class="ri-body">
+      <p>The device will reboot and apply Wi‑Fi mode, STA credentials, and soft‑AP overrides where configured.</p>
+      <p style="font-size:13px;color:#555;margin-top:8px;">STA-first mode tries your saved network first; if it fails, the soft‑AP starts using your custom AP SSID/password when set (otherwise the factory defaults).</p>
+      <div class="ri-step ok">
+        <span class="ri-icon">✅</span>
+        <span><strong>If connection succeeds:</strong> the assigned IP address will be
+        printed in the serial console, and shown on the display (if available).</span>
+      </div>
+      <div class="ri-step err">
+        <span class="ri-icon">⚠️</span>
+        <span><strong>If connection fails:</strong> the device will automatically fall back
+        to <strong>AP mode</strong>, so you can reconnect and reconfigure.</span>
+      </div>
+    </div>
+    <div class="ri-footer">
+      <button onclick="closeWifiRestartInfo()"
+        style="padding:9px 22px;border:none;border-radius:6px;background:#006EAB;color:#fff;
+               cursor:pointer;font-size:13px;font-weight:600;">Got it</button>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ─── URL map ────────────────────────────────────────────
+   Page key → function that returns the URL to load.
+   Sim and central use device-scoped paths when a device
+   is known from the latest status broadcast.
+   ───────────────────────────────────────────────────── */
+const PAGE_URLS = {
+  scan:    () => '/scan',
+  central: () => activeDeviceId.central ? `/central/${activeDeviceId.central}` : '/central',
+  devices: () => '/devices',
+  sim:     () => activeDeviceId.sim     ? `/sim/${activeDeviceId.sim}`         : '/sim',
+  edit:    () => '/edit',
+  files:   () => '/fs',
+};
+
+const loaded  = new Set();       // pages already loaded into their iframe
+const pending = new Set();       // pages queued for reload (device-id changed)
+
+/* Tracks the current active device for device-scoped pages */
+const activeDeviceId = { sim: null, central: null };
+
+/* Pending auto-redirect info filled by status messages */
+let autoRedirectTarget = null;   // { page, url, label }
+
+/* ─── Navigation ─────────────────────────────────────── */
+function navigate(page, pushState = true) {
+  document.getElementById('navLinks').classList.remove('open');
+
+  document.querySelectorAll('.nav-link').forEach(a =>
+    a.classList.toggle('active', a.dataset.page === page)
+  );
+  document.querySelectorAll('.page-content, .page-frame').forEach(el =>
+    el.classList.remove('active')
+  );
+
+  const target = document.getElementById('page-' + page);
+  if (target) target.classList.add('active');
+
+  if (page !== 'home') {
+    const frame = document.getElementById('frame-' + page);
+    if (frame) {
+      const url = PAGE_URLS[page] ? PAGE_URLS[page]() : null;
+      if (url) {
+        /* Reload if not yet loaded, OR if device-id changed (pending) */
+        if (!loaded.has(page) || pending.has(page)) {
+          frame.src = url;
+          loaded.add(page);
+          pending.delete(page);
+        }
+      }
+    }
+  }
+
+  if (pushState) history.pushState({ page }, '', '#' + page);
+}
+
+/* Called when a status pill is clicked */
+function pillClick(mode) {
+  if (mode === 'scan'    && document.getElementById('pillScan').classList.contains('active-scan'))
+    navigate('scan');
+  else if (mode === 'central' && document.getElementById('pillCentral').classList.contains('active-central'))
+    navigate('central');
+  else if (mode === 'periph'  && document.getElementById('pillPeriph').classList.contains('active-periph'))
+    navigate('sim');
+}
+
+window.addEventListener('popstate', e =>
+  navigate((e.state && e.state.page) || pageFromHash() || 'home', false)
+);
+
+function pageFromHash() {
+  return location.hash.replace('#', '') || 'home';
+}
+
+/* ─── Auto-redirect logic ────────────────────────────── */
+function setAutoRedirect(page, label) {
+  autoRedirectTarget = { page, label };
+  const banner = document.getElementById('auto-redirect-banner');
+  const msg    = document.getElementById('auto-redirect-msg');
+  if (banner && msg) {
+    msg.textContent = `${label} is active. `;
+    banner.classList.add('visible');
+  }
+}
+
+function clearAutoRedirect() {
+  autoRedirectTarget = null;
+  const banner = document.getElementById('auto-redirect-banner');
+  if (banner) banner.classList.remove('visible');
+}
+
+function doAutoRedirect() {
+  if (autoRedirectTarget) navigate(autoRedirectTarget.page);
+}
+
+/* Pick the highest-priority active mode and update the banner.
+   Priority: scanning > central > sim */
+function refreshAutoRedirect() {
+  const scanActive    = document.getElementById('pillScan').classList.contains('active-scan');
+  const centralActive = document.getElementById('pillCentral').classList.contains('active-central');
+  const periphActive  = document.getElementById('pillPeriph').classList.contains('active-periph');
+
+  const currentPage = pageFromHash();
+  if (currentPage !== 'home') { clearAutoRedirect(); return; }
+
+  if (scanActive)         setAutoRedirect('scan',    '🔍 Scanner');
+  else if (centralActive) setAutoRedirect('central', '📡 Central');
+  else if (periphActive)  setAutoRedirect('sim',     '🎮 Simulator');
+  else                    clearAutoRedirect();
+}
+
+/* ─── Status WebSocket ───────────────────────────────── */
+let statusWs = null;
+
+function statusWsConnect() {
+  try {
+    statusWs = new WebSocket('ws://' + window.location.hostname + '/ws');
+
+    statusWs.onopen = () => {
+      const el = document.getElementById('navWsStatus');
+      el.textContent = 'WS On';
+      el.classList.add('ws-on');
+      /* Poll current status for all three modes */
+      ['scanner', 'central', 'sim'].forEach(t =>
+        statusWs.send(JSON.stringify({ type: t, action: 'status' }))
+      );
+    };
+
+    statusWs.onmessage = ev => {
+      let msg; try { msg = JSON.parse(ev.data); } catch { return; }
+      handleStatusMsg(msg);
+    };
+
+    statusWs.onclose = () => {
+      const el = document.getElementById('navWsStatus');
+      el.textContent = 'WS Off';
+      el.classList.remove('ws-on');
+      setTimeout(statusWsConnect, 4000);
+    };
+
+    statusWs.onerror = () => statusWs.close();
+  } catch { setTimeout(statusWsConnect, 4000); }
+}
+
+function handleStatusMsg(msg) {
+  switch (msg.type) {
+
+    case 'scan_status':
+      setPill('pillScan', 'active-scan', msg.scanning === true);
+      refreshAutoRedirect();
+      /* If scanning just started and we're on the home page, auto-redirect */
+      if (msg.scanning && pageFromHash() === 'home')
+        setAutoRedirect('scan', '🔍 Scanner');
+      break;
+
+    case 'central_status': {
+      const active = msg.status === 'started';
+      /* Track device-id so the central iframe loads the right URL */
+      if (active && msg.device) {
+        const prev = activeDeviceId.central;
+        activeDeviceId.central = msg.device;
+        if (prev !== msg.device) pending.add('central');
+      } else if (!active) {
+        activeDeviceId.central = null;
+        pending.add('central');
+      }
+      setPill('pillCentral', 'active-central', active);
+      refreshAutoRedirect();
+      if (active && pageFromHash() === 'home')
+        setAutoRedirect('central', '📡 Central');
+      break;
+    }
+
+    case 'sim_status': {
+      const active = msg.status === 'started';
+      if (active && msg.device) {
+        const prev = activeDeviceId.sim;
+        activeDeviceId.sim = msg.device;
+        if (prev !== msg.device) pending.add('sim');
+      } else if (!active) {
+        activeDeviceId.sim = null;
+        pending.add('sim');
+      }
+      setPill('pillPeriph', 'active-periph', active);
+      refreshAutoRedirect();
+      if (active && pageFromHash() === 'home')
+        setAutoRedirect('sim', '🎮 Simulator');
+      break;
+    }
+
+    /* Generic unified status message (firmware convenience) */
+    case 'status':
+      if (msg.mode === 'scan')
+        handleStatusMsg({ type: 'scan_status', scanning: msg.active });
+      else if (msg.mode === 'central')
+        handleStatusMsg({ type: 'central_status', status: msg.active ? 'started' : 'stopped', device: msg.device });
+      else if (msg.mode === 'peripheral' || msg.mode === 'sim')
+        handleStatusMsg({ type: 'sim_status', status: msg.active ? 'started' : 'stopped', device: msg.device });
+      break;
+  }
+}
+
+function setPill(id, cls, active) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.classList.remove('active-scan', 'active-central', 'active-periph');
+  if (active) el.classList.add(cls);
+}
+
+const wifiModal = document.getElementById('wifiModal');
+
+async function openWifiModal() {
+  wifiModal.style.display = 'flex';
+  document.getElementById('wifiStatus').textContent = '';
+  document.getElementById('wifiPsk').value = '';
+  document.getElementById('wifiApPsk').value = '';
+  document.getElementById('wifiApPskClear').checked = false;
+  try {
+    const r = await fetch('/api/wifi');
+    const d = await r.json();
+    document.getElementById('wifiSsid').value = d.ssid || '';
+    document.getElementById('wifiMode').value = d.mode === 'ap_only' ? 'ap_only' : 'sta_first';
+    document.getElementById('wifiApSsid').value = d.ap_ssid || '';
+    const modeLabel = d.mode === 'ap_only' ? 'AP-only' : 'STA-first';
+    const staLine = d.ssid
+      ? `STA: ${d.ssid} (${d.has_psk ? 'password saved' : 'no password'})`
+      : 'STA: not configured';
+    document.getElementById('wifiCurrentSsid').textContent =
+      `${modeLabel} · ${staLine} · Soft-AP broadcast: ${d.ap_ssid_effective || '…'}${d.has_ap_psk ? ' (custom AP password)' : ''}`;
+  } catch(e) {
+    document.getElementById('wifiCurrentSsid').textContent = 'Could not load current settings';
+  }
+}
+
+function closeWifiModal() {
+  wifiModal.style.display = 'none';
+}
+
+function togglePskVisibility() {
+  const f = document.getElementById('wifiPsk');
+  f.type = f.type === 'password' ? 'text' : 'password';
+}
+
+function toggleWifiApPskVisibility() {
+  const f = document.getElementById('wifiApPsk');
+  f.type = f.type === 'password' ? 'text' : 'password';
+}
+
+async function doSaveWifi() {
+  const mode = document.getElementById('wifiMode').value;
+  const sta = document.getElementById('wifiSsid').value.trim();
+  const psk = document.getElementById('wifiPsk').value;
+  const apSsid = document.getElementById('wifiApSsid').value.trim();
+  const apPsk = document.getElementById('wifiApPsk').value;
+  const apClear = document.getElementById('wifiApPskClear').checked;
+  const status = document.getElementById('wifiStatus');
+
+  if (!apClear && apPsk.length > 0 && (apPsk.length < 8 || apPsk.length > 63)) {
+    status.textContent = 'AP password must be 8–63 characters (WPA2), or leave empty.';
+    return false;
+  }
+
+  status.style.color = '#555';
+  status.textContent = 'Saving…';
+  const body = { mode, ap_ssid: apSsid };
+  if (sta) body.ssid = sta;
+  if (psk) body.psk = psk;
+  if (apClear) body.ap_psk = '';
+  else if (apPsk.length > 0) body.ap_psk = apPsk;
+
+  try {
+    const r = await fetch('/api/wifi', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const d = await r.json();
+    if (!d.ok) {
+      status.style.color = '#c0392b';
+      status.textContent = `Error: ${d.error || 'unknown'}`;
+      return false;
+    }
+    return true;
+  } catch(e) {
+    status.style.color = '#c0392b';
+    status.textContent = `Request failed: ${e.message}`;
+    return false;
+  }
+}
+
+async function saveWifi() {
+  const ok = await doSaveWifi();
+  if (ok) {
+    const status = document.getElementById('wifiStatus');
+    status.style.color = '#27ae60';
+    status.textContent = '✓ Saved. Reboot the device to apply new WiFi settings.';
+    showWifiRestartInfo(); 
+  }
+}
+
+async function saveWifiAndReboot() {
+  if (!await doSaveWifi()) return;
+  const status = document.getElementById('wifiStatus');
+  status.style.color = '#e67e22';
+  status.textContent = '⟳ Saved. Rebooting device…';
+  showWifiRestartInfo();             
+  setTimeout(() => rebootDevice(), 2000);   
+}
+
+function confirmReboot() {
+  if (!confirm('Reboot the ESP32 now?')) return;
+  rebootDevice();
+  // Briefly show feedback in the WS status badge
+  const el = document.getElementById('navWsStatus');
+  el.textContent = 'Rebooting…';
+  el.classList.remove('ws-on');
+}
+
+// Shared reboot function (usable from modal and nav button)
+function rebootDevice() {
+  if (statusWs && statusWs.readyState === WebSocket.OPEN) {
+    statusWs.send(JSON.stringify({ type: 'system', action: 'reboot' }));
+  }
+}
+
+// Close on backdrop click
+wifiModal.addEventListener('click', e => { if (e.target === wifiModal) closeWifiModal(); });
+
+function showWifiRestartInfo() {
+  document.getElementById('wifiRestartInfo').classList.add('visible');
+}
+function closeWifiRestartInfo() {
+  document.getElementById('wifiRestartInfo').classList.remove('visible');
+}
+
+/* ─── Boot ───────────────────────────────────────────── */
+document.addEventListener('DOMContentLoaded', () => {
+  /* Restore page from hash first */
+  const initPage = pageFromHash();
+  if (initPage !== 'home') navigate(initPage, false);
+
+  /* Then start WS — status messages will update pills and banner */
+  statusWsConnect();
+});
+</script>
+
+</body>
+</html>

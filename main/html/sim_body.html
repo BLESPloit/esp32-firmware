@@ -1,0 +1,610 @@
+<script>document.title = "BLE Device Simulator";</script>
+<link rel="stylesheet" href="/static/sim.css">
+
+<div class="container">
+
+  <div class="header">
+    <div class="device-icon" id="deviceIconContainer">
+      <img id="deviceImage" src="" alt="Device Icon" style="display:none">
+      <span class="fallback" id="iconFallback">&#128241;</span>
+    </div>
+    <div class="device-info">
+      <h1 id="deviceName">Bluetooth Device Simulator</h1>
+      <span id="statusBadge" class="status-badge status-inactive">Inactive</span>
+      <div class="device-meta">
+        Device ID: <span id="deviceId">&#8212;</span>
+      </div>
+      <div class="device-description" id="deviceDescription"></div>
+      <div class="device-author"      id="deviceAuthor"></div>
+      <div class="device-link"        id="deviceLinkContainer"></div>
+    </div>
+    <span id="wsStatus" class="ws-status ws-disconnected">WS Off</span>
+  </div>
+
+  <div class="main-content">
+
+    <!-- Left column: Device Display + interface buttons -->
+    <div class="panel">
+      <div class="panel-header">Device Display</div>
+      <div class="panel-content">
+        <div class="display-container">
+
+          <div class="controls">
+            <button class="btn btn-primary" id="btnStart">Start Simulation</button>
+            <button class="btn btn-danger"  id="btnStop" disabled>Stop Simulation</button>
+          </div>
+
+          <div class="canvas-wrapper">
+            <canvas id="display"></canvas>
+          </div>
+        <div class="interface-buttons-hint" id="interfaceButtonsHint" style="display:none">
+          Physical (local) buttons on the simulated device:
+        </div>
+          <div id="interfaceButtons" class="interface-buttons">
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right column: Advertising Status + Debug Log -->
+    <div class="panel">
+
+      <!-- Advertising data panel -->
+      <div class="panel-header">Advertising Status</div>
+      <div class="panel-content" id="advPanel">
+        <div id="advEntries" style="font-size:13px;">
+          <span style="color:#888;font-style:italic;">No advertising data yet.</span>
+        </div>
+      </div>
+
+      <!-- Debug log -->
+      <div class="panel-header" style="margin-top:12px;">Debug Log</div>
+      <div class="debug-controls">
+
+        <label class="debug-toggle">
+          <input type="checkbox" id="chkWsLog">
+          WebSocket messages
+        </label>
+
+        <label class="debug-toggle" title="Log GATT/subscribe packets from central; uncheck sends stop to firmware">
+          <input type="checkbox" id="chkBleSimTrace" checked>
+          BLE inbound trace
+        </label>
+
+        <div class="esp-log-group">
+          <label class="debug-toggle">
+            <input type="checkbox" id="chkEspLog">
+            ESP logs (Error, Warning)
+          </label>
+
+          <label class="debug-toggle" id="espInfoLogRow" style="display:none">
+            <input type="checkbox" id="chkEspInfoLog">
+            ESP logs (Info)
+          </label>
+
+          <div class="tag-manager" id="tagManagerPanel" style="display:none">
+            <div class="tag-manager-label">INFO tag filter:</div>
+            <div class="tag-list" id="tagList">
+              <span class="tag-list-empty" id="tagListEmpty">No tags &#8212; all INFO</span>
+            </div>
+            <div class="tag-add-row">
+              <input type="text" id="newTagInput" placeholder="e.g. BLE sim">
+              <button type="button" id="addTagBtn">+ Add</button>
+            </div>
+          </div>
+        </div>
+
+      </div>
+      <div id="debugLog" class="debug-log">
+        <div class="log-entry log-I">00:00:00 Debug log initialized</div>
+      </div>
+    </div>
+
+  </div><!-- /.main-content -->
+
+  <div id="textNotification" class="text-notification"></div>
+</div><!-- /.container -->
+
+<script>
+// ─────────────────────────────────────────────
+// Sim-specific state
+// ─────────────────────────────────────────────
+let isSimulating    = false;
+
+let imageCache      = {};
+let svgCache        = {};
+let canvasElements  = {};
+let textElements    = {};
+let backgroundColor = 'ffffff';
+
+// ─────────────────────────────────────────────
+// Device info
+// ─────────────────────────────────────────────
+function loadSimDeviceInfo() {
+  if (!deviceId) return;
+  // common.js loadDeviceInfo() handles name + icon; we extend with extra fields
+  fetch(`/api/device/${deviceId}/info`)
+    .then(r => r.json())
+    .then(d => {
+      if (d.description) document.getElementById('deviceDescription').textContent = d.description;
+      if (d.author)      document.getElementById('deviceAuthor').textContent      = `Author: ${d.author}`;
+      if (d.link)        document.getElementById('deviceLinkContainer').innerHTML =
+        `<a href="${escHtml(d.link)}" target="_blank" rel="noopener noreferrer">More info</a>`;
+      addEspLog('I', 'web', `Device info loaded: ${d.name || deviceId}`);
+    })
+    .catch(() => addEspLog('W', 'web', 'Could not load device info'));
+}
+
+// ─────────────────────────────────────────────
+// Advertising data rendering
+// ─────────────────────────────────────────────
+
+// addr type label map
+const ADV_ADDR_LABELS = {
+  random_generated: 'Random (generated)',
+  random_specific:  'Random (specific)',
+  randomgenerated:  'Random (generated)',  // fallback camelCase
+  randomspecific:   'Random (specific)',   // fallback camelCase
+  public:           'Public',
+  public_hardware:  'Public (hardware)',
+  publichardware:   'Public (hardware)',   // fallback camelCase
+};
+
+function renderAdvData(advArray) {
+  const container = document.getElementById('advEntries');
+  if (!Array.isArray(advArray) || advArray.length === 0) {
+    container.innerHTML = '<span style="color:#888;font-style:italic;">No advertising instances.</span>';
+    return;
+  }
+  let html = '';
+  advArray.forEach(inst => {
+    const runningBadge = inst.running
+      ? '<span style="background:#c8e6c9;color:#1b5e20;padding:1px 7px;border-radius:9px;font-size:11px;margin-left:6px;">advertising</span>'
+      : '<span style="background:#ffcdd2;color:#b71c1c;padding:1px 7px;border-radius:9px;font-size:11px;margin-left:6px;">idle</span>';
+    const addrType  = inst.addr_type  || inst.addrtype  || '';
+    const bdAddr    = inst.bd_addr    || inst.bdaddr    || '—';
+    const addrLabel = ADV_ADDR_LABELS[addrType] || addrType || '—';
+    html += `
+      <div style="background:#f9f9f9;border-left:3px solid #FF9800;border-radius:4px;padding:8px 12px;margin-bottom:8px;">
+        <div style="font-weight:bold;font-size:13px;">
+          Instance ${inst.instance} &mdash; <span style="font-family:monospace">${escHtml(inst.id || '')}</span>
+          ${runningBadge}
+        </div>
+        <div style="font-family:monospace;font-size:12px;color:#444;margin-top:4px;">
+          BD Address: <b>${escHtml(bdAddr)}</b>
+          &nbsp;&nbsp;|&nbsp;&nbsp;
+          Type: ${escHtml(addrLabel)}
+        </div>
+      </div>`;
+  });
+  container.innerHTML = html;
+}
+
+// ─────────────────────────────────────────────
+// Interface buttons
+// ─────────────────────────────────────────────
+function loadInterfaceButtons() {
+  if (!deviceId) return;
+  fetch(`/api/device/${deviceId}/interface`)
+    .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+    .then(data => {
+      if (data.buttons?.length) renderInterfaceButtons(data.buttons);
+      else addEspLog('W', 'web', 'No buttons in interface data');
+    })
+    .catch(err => addEspLog('W', 'web', `Failed to load interface: ${err.message}`));
+}
+
+function renderInterfaceButtons(buttons) {
+  const container = document.getElementById('interfaceButtons');
+  container.innerHTML = '';
+  buttons.forEach(btn => {
+    const el = document.createElement('button');
+    el.className   = 'interface-btn';
+    el.textContent = btn.name || 'Button';
+    const tipParts = [];
+    if (btn.physical?.button_id !== undefined) tipParts.push(`Physical Button ${btn.physical.button_id}`);
+    if (btn.physical?.press) {
+      const p = btn.physical.press;
+      tipParts.push(p === 'single' ? 'Single Press' : p === 'double' ? 'Double Press' : p === 'long' ? 'Long Press' : p);
+    }
+    if (tipParts.length) el.title = tipParts.join(' | ');
+    el.addEventListener('click', () => {
+      addEspLog('I', 'web', `Button: ${btn.name} (${btn.id})`);
+      wsSend({ type: 'sim_button', id: btn.id });
+    });
+    container.appendChild(el);
+  });
+  const hint = document.getElementById('interfaceButtonsHint');
+  if (hint) hint.style.display = buttons.length ? 'block' : 'none';
+  addEspLog('I', 'web', `Rendered ${buttons.length} interface buttons`);
+}
+
+// ─────────────────────────────────────────────
+// Canvas rendering
+// ─────────────────────────────────────────────
+function canvasSize() {
+  return document.getElementById('display').width;
+}
+
+function normToCanvas(align, x, y, w, h) {
+  const s  = canvasSize();
+  const ew = w > 0 ? Math.round(w * s / 100) : 0;
+  const eh = h > 0 ? Math.round(h * s / 100) : 0;
+  const anchors = {
+    top_left:      [0,          0         ],
+    top_center:    [s/2 - ew/2, 0         ],
+    top_right:     [s   - ew,   0         ],
+    middle_left:   [0,          s/2 - eh/2],
+    center:        [s/2 - ew/2, s/2 - eh/2],
+    mid_right:     [s   - ew,   s/2 - eh/2],
+    bottom_left:   [0,          s   - eh  ],
+    bottom_center: [s/2 - ew/2, s   - eh  ],
+    bottom_right:  [s   - ew,   s   - eh  ],
+  };
+  const [ax, ay] = anchors[align] ?? anchors['center'];
+  const px = Math.round(ax + (x * s / 100));
+  const py = Math.round(ay + (y * s / 100));
+  return { px, py, pw: ew, ph: eh };
+}
+
+async function redrawCanvas() {
+  const canvas = document.getElementById('display');
+  const ctx    = canvas.getContext('2d');
+  ctx.fillStyle = `#${backgroundColor}`;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  const draws = Object.values(canvasElements)
+    .sort((a, b) => a.zIndex - b.zIndex)
+    .map(elem => {
+      if (elem.type === 'png') return drawPNGImmediate(ctx, elem);
+      if (elem.type === 'svg') return drawSvgImmediate(ctx, elem);
+      return Promise.resolve();
+    });
+
+  await Promise.all(draws);
+
+  Object.values(textElements)
+    .forEach(t => drawTextWithBackground(ctx, t.text, t.align, t.x, t.y, t.color, t.size));
+}
+
+function drawPNG(id, path, align, x, y, w, h) {
+  const zIndex  = canvasElements[id]?.zIndex ?? Object.keys(canvasElements).length;
+  const perform = () => {
+    canvasElements[id] = { type: 'png', path, align, x, y, w, h, zIndex };
+    redrawCanvas();
+  };
+  if (imageCache[path]) perform();
+  else {
+    const img   = new Image();
+    img.onload  = () => { imageCache[path] = img; perform(); addEspLog('I', 'canvas', `PNG loaded: ${path}`); };
+    img.onerror = () => addEspLog('E', 'canvas', `Failed to load PNG: ${path}`);
+    img.src = path;
+  }
+}
+
+function drawPNGImmediate(ctx, elem) {
+  if (!imageCache[elem.path]) return Promise.resolve();
+  const img = imageCache[elem.path];
+  const { px, py, pw, ph } = normToCanvas(elem.align, elem.x, elem.y, elem.w, elem.h);
+  ctx.drawImage(img, px, py, pw || img.naturalWidth, ph || img.naturalHeight);
+  return Promise.resolve();
+}
+
+function drawSvg(id, svgPath, align, x, y, w, color = null) {
+  if (color) color = color.replace(/^#/, '');
+  const zIndex  = canvasElements[id]?.zIndex ?? Object.keys(canvasElements).length;
+  const perform = () => {
+    canvasElements[id] = { type: 'svg', svg: svgPath, align, x, y, w, color, zIndex };
+    redrawCanvas();
+  };
+  if (svgCache[svgPath]) perform();
+  else {
+    fetch(svgPath)
+      .then(r => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.text();
+      })
+      .then(svg => { svgCache[svgPath] = svg; perform(); addEspLog('I', 'canvas', `SVG loaded: ${svgPath}`); })
+      .catch(e  => addEspLog('E', 'canvas', `Failed to load SVG ${svgPath}: ${e.message}`));
+  }
+}
+
+function drawSvgImmediate(ctx, elem) {
+  if (!svgCache[elem.svg]) return Promise.resolve();
+  return new Promise(resolve => {
+    const { px, py, pw } = normToCanvas(elem.align, elem.x, elem.y, elem.w, elem.w);
+    const sz = pw || Math.round(canvasSize() * 0.3);
+    const svgText = elem.color
+      ? svgCache[elem.svg].replace(
+          /(<svg\b[^>]*>)/i,
+          `$1<style>path,circle,rect,polygon,ellipse{fill:#${elem.color} !important}</style>`
+        )
+      : svgCache[elem.svg];
+    const blob = new Blob([svgText], { type: 'image/svg+xml' });
+    const url  = URL.createObjectURL(blob);
+    const img  = new Image();
+    img.onload  = () => { ctx.drawImage(img, px, py, sz, sz); URL.revokeObjectURL(url); resolve(); };
+    img.onerror = () => { URL.revokeObjectURL(url); resolve(); };
+    img.src = url;
+  });
+}
+
+function updateElementColor(id, color) {
+  if (!canvasElements[id]) { addEspLog('W', 'canvas', `Cannot update color: ${id} not found`); return; }
+  if (canvasElements[id].type !== 'svg') { addEspLog('W', 'canvas', `Cannot update color: ${id} is not svg`); return; }
+  canvasElements[id].color = color;
+  redrawCanvas();
+}
+
+function removeElement(id) {
+  if (!canvasElements[id]) { addEspLog('W', 'canvas', `Cannot remove: ${id} not found`); return; }
+  delete canvasElements[id];
+  redrawCanvas();
+}
+
+function drawText(text, align, x, y, color = 'fff', size = 12, duration = 0) {
+  const id = `text_${Date.now()}_${Math.random()}`;
+  textElements[id] = { text, align, x, y, color, size };
+  redrawCanvas();
+  if (duration > 0) setTimeout(() => { delete textElements[id]; redrawCanvas(); }, duration);
+}
+
+function drawTextWithBackground(ctx, text, align, x, y, color = 'fff', size = 12) {
+  const s      = canvasSize();
+  const sizePx = Math.round(size * s / 100);
+  ctx.font         = `${sizePx}px monospace`;
+  ctx.textAlign    = 'left';           // we position manually
+  ctx.textBaseline = 'top';            // py is always the TOP of the text
+
+  const tw  = ctx.measureText(text).width;
+  const th  = sizePx * 1.2;
+  const pad = 4;
+
+  // Pass actual text dimensions (as canvas-unit percentages) into normToCanvas
+  // so that bottom_center / top_center anchors account for real text height.
+  // w/h here are already in canvas pixels, so we pass them directly via a
+  // pixel-aware version: convert back to % for normToCanvas.
+  const wPct = (tw + pad * 2) * 100 / s;
+  const hPct = (th + pad * 2) * 100 / s;
+  const { px, py } = normToCanvas(align, x, y, wPct, hPct);
+
+  // Draw background rect — top-left corner at (px, py)
+  ctx.fillStyle = isColorDark(color) ? 'rgba(255,255,255,0.75)' : 'rgba(0,0,0,0.7)';
+  ctx.fillRect(px, py, tw + pad * 2, th + pad * 2);
+
+  // Draw text inset by pad
+  ctx.fillStyle = `#${color}`;
+  ctx.fillText(text, px + pad, py + pad);
+}
+
+function isColorDark(hex) {
+  const r = parseInt(hex.substring(0, 2), 16);
+  const g = parseInt(hex.substring(2, 4), 16);
+  const b = parseInt(hex.substring(4, 6), 16);
+  return (r * 299 + g * 587 + b * 114) / 1000 < 128;
+}
+
+// Helper to decide if text color is dark (needs light background)
+function isColorDark(hex) {
+  const r = parseInt(hex.substring(0,2), 16);
+  const g = parseInt(hex.substring(2,4), 16);
+  const b = parseInt(hex.substring(4,6), 16);
+  return (r * 299 + g * 587 + b * 114) / 1000 < 128;
+}
+
+function drawLine(x1, y1, x2, y2, color = '000', width = 1) {
+  const { px: px1, py: py1 } = normToCanvas('center', x1, y1, 0, 0);
+  const { px: px2, py: py2 } = normToCanvas('center', x2, y2, 0, 0);
+  const ctx = document.getElementById('display').getContext('2d');
+  ctx.strokeStyle = `#${color}`; ctx.lineWidth = width;
+  ctx.beginPath(); ctx.moveTo(px1, py1); ctx.lineTo(px2, py2); ctx.stroke();
+}
+
+// ─────────────────────────────────────────────
+// BLE simulated-peripheral inbound trace (ble_sim_trace)
+// ─────────────────────────────────────────────
+function formatBleSimTraceLine(cmd) {
+  const action = (cmd.action || '?').toString().toUpperCase();
+  const parts = [`ble_sim ▶ ${action}`];
+  if (cmd.conn != null) parts.push(`conn=${cmd.conn}`);
+  if (cmd.svc) parts.push(`svc=${cmd.svc}`);
+  if (cmd.chr) parts.push(`chr=${cmd.chr}`);
+  if (cmd.data != null && String(cmd.data).length > 0) parts.push(`data=${cmd.data}`);
+  if (cmd.attr_handle != null) parts.push(`attr=${cmd.attr_handle}`);
+  if (typeof cmd.reason === 'number') parts.push(`reason=${cmd.reason}`);
+  if (Object.prototype.hasOwnProperty.call(cmd, 'notify')) parts.push(`notify=${!!cmd.notify}`);
+  if (Object.prototype.hasOwnProperty.call(cmd, 'indicate')) parts.push(`indicate=${!!cmd.indicate}`);
+  if (Object.prototype.hasOwnProperty.call(cmd, 'prev_notify')) {
+    parts.push(`prev_notify=${!!cmd.prev_notify}`);
+    parts.push(`prev_indicate=${!!cmd.prev_indicate}`);
+  }
+  return parts.join('  │  ');
+}
+
+function addBleSimTraceLine(cmd) {
+  const chk = document.getElementById('chkBleSimTrace');
+  if (!chk || !chk.checked) return;
+  const log = document.getElementById('debugLog');
+  if (!log) return;
+  const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+  const div = document.createElement('div');
+  div.className = 'log-entry log-ble-trace';
+  div.textContent = `${ts} ${formatBleSimTraceLine(cmd)}`;
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+}
+
+function syncBleSimTraceEmitFromUi() {
+  const chk = document.getElementById('chkBleSimTrace');
+  if (!chk) return;
+  wsSend({ type: 'ble_sim_trace', enabled: chk.checked });
+}
+
+// ─────────────────────────────────────────────
+// WebSocket message handler
+// ─────────────────────────────────────────────
+function handleWsMessage(cmd) {
+  switch (cmd.type) {
+
+    case 'ble_sim_trace':
+      addBleSimTraceLine(cmd);
+      break;
+
+    case 'gfx':
+      switch (cmd.cmd) {
+        case 'png':
+          if (!cmd.id) { addEspLog('E', 'canvas', 'PNG missing id'); break; }
+          drawPNG(cmd.id, cmd.path, cmd.align ?? 'center', cmd.x ?? 0, cmd.y ?? 0, cmd.w ?? 0, cmd.h ?? 0);
+          break;
+        case 'svg':
+          if (!cmd.id || !cmd.svg) { addEspLog('E', 'canvas', 'SVG missing id/svg'); break; }
+          drawSvg(cmd.id, cmd.svg, cmd.align ?? 'center', cmd.x ?? 0, cmd.y ?? 0, cmd.w ?? 0,
+                  cmd.color ? cmd.color.replace(/^#/, '') : null);
+          break;
+        case 'color':      updateElementColor(cmd.id, cmd.color); break;
+        case 'remove':     removeElement(cmd.id); break;
+        case 'background':
+          backgroundColor = (cmd.color || '#ffffff').replace(/^#/, '');
+          redrawCanvas(); break;
+        case 'clear':
+          backgroundColor = 'ffffff'; canvasElements = {}; textElements = {};
+          redrawCanvas(); break;
+        case 'notification':
+          drawText(cmd.text, cmd.align ?? 'center', cmd.x ?? 0, cmd.y ?? 0,
+                   (cmd.color || 'ffffff').replace(/^#/, ''),
+                   cmd.size ?? 10, cmd.duration ?? 2000);
+          break;
+        case 'text':
+          if (!cmd.id) { addEspLog('W', 'canvas', 'text cmd missing id'); break; }
+          textElements[cmd.id] = {
+            text:  cmd.text,
+            align: cmd.align ?? 'center',
+            x:     cmd.x ?? 0,
+            y:     cmd.y ?? 0,
+            color: (cmd.color || 'ffffff').replace(/^#/, ''),
+            size:  cmd.size ?? 10
+          };
+          redrawCanvas();
+          break;
+        default: addEspLog('W', 'canvas', `Unknown gfx cmd: ${cmd.cmd}`);
+      }
+      break;
+
+    case 'sim_status':
+      if (cmd.status === 'started') {
+        activateSimulationUI(cmd.device);
+        renderAdvData(cmd.adv);
+      } else if (cmd.status === 'stopped') {
+        deactivateSimulationUI();
+        renderAdvData([]);
+      }
+      break;
+
+    case 'notify': showTextNotification(cmd.text || ''); break;
+    case 'log':    addEspLog(cmd.level, cmd.tag, cmd.msg); break;
+    case 'hello':          // firmware handshake — acknowledge and ignore
+      addEspLog('I', 'web', `WS hello from firmware (v${cmd.version ?? '?'})`);
+      break;
+    case 'device_status':  // generic device status broadcast — ignored in sim context
+      break;
+    default:       addEspLog('W', 'web', `Unknown WS type: ${cmd.type}`); break;
+  }
+}
+
+// ─────────────────────────────────────────────
+// Simulation start / stop
+// ─────────────────────────────────────────────
+function startSimulation(id) {
+  wsSend({ type: 'sim', action: 'start', device: id });
+}
+
+function stopSimulation() {
+  wsSend({ type: 'sim', action: 'stop' });
+}
+
+function activateSimulationUI(deviceName) {
+  if (!deviceId) { addEspLog('E', 'sim', 'Cannot start: no device ID'); return; }
+  isSimulating = true;
+  setStatus('Active');
+  document.getElementById('btnStart').disabled = true;
+  document.getElementById('btnStop').disabled  = false;
+  if (deviceName) addEspLog('I', 'sim', `Simulating: ${deviceName}`);
+}
+
+function deactivateSimulationUI() {
+  isSimulating = false;
+  setStatus('Inactive');
+  document.getElementById('btnStart').disabled = false;
+  document.getElementById('btnStop').disabled  = true;
+  textElements = {};
+  redrawCanvas();
+}
+
+// ─────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────
+function escHtml(t) {
+  const d = document.createElement('div');
+  d.textContent = t;
+  return d.innerHTML;
+}
+
+function setStatus(label) {
+  const sb  = document.getElementById('statusBadge');
+  sb.textContent = label;
+  sb.className   = label === 'Inactive' ? 'status-badge status-inactive' : 'status-badge status-active';
+}
+
+// ─────────────────────────────────────────────
+// Button wiring
+// ─────────────────────────────────────────────
+document.getElementById('btnStart').addEventListener('click', () => { if (deviceId) startSimulation(deviceId); });
+document.getElementById('btnStop').addEventListener('click',  stopSimulation);
+
+// ─────────────────────────────────────────────
+// Init
+// ─────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+  deviceId = getDeviceIdFromURL('sim');
+  document.getElementById('deviceId').textContent = deviceId || 'Not found';
+
+  const canvas  = document.getElementById('display');
+  const wrapper = canvas.parentElement;
+  const size    = wrapper.clientWidth || 300;
+  canvas.width  = size;
+  canvas.height = size;
+  window.addEventListener('resize', () => {
+    const newSize = wrapper.clientWidth || 300;
+    canvas.width  = newSize;
+    canvas.height = newSize;
+    redrawCanvas();
+  });
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = `#${backgroundColor}`;
+  ctx.fillRect(0, 0, size, size);
+  addEspLog('I', 'canvas', `Canvas initialized ${size}×${size}`);
+
+  if (deviceId) {
+    loadDeviceInfo();
+    loadSimDeviceInfo();
+    loadInterfaceButtons();
+    loadWslogFilter();
+    addEspLog('I', 'web', `Device: ${deviceId}`);
+  } else {
+    addEspLog('W', 'web', 'No device ID in URL — expected /sim/<deviceId>');
+  }
+
+  wsReconnectGuard = () => true;
+
+  window.afterWebSocketOpen = syncBleSimTraceEmitFromUi;
+  connectWebSocket();
+
+  const chkBle = document.getElementById('chkBleSimTrace');
+  if (chkBle) chkBle.addEventListener('change', syncBleSimTraceEmitFromUi);
+
+  // Request current sim status once WS opens — covers page load during active sim.
+  // connectWebSocket() is already in progress (CONNECTING), so wsSend queues the
+  // message without opening a second socket, and flushes it on onopen.
+  wsSend({ type: 'sim', action: 'status' });
+});
+</script>

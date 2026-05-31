@@ -1,0 +1,439 @@
+<script>
+    document.title = 'BLE Scanner';
+    document.body.classList.add('scan-page');
+</script>
+<link rel="stylesheet" href="/static/scan.css">
+<h1>BLE Scanner</h1>
+
+<div class="card controls">
+    <div class="button-group">
+        <button id="startBtn" onclick="startScan()">Start Scan</button>
+        <button id="stopBtn"  onclick="stopScan()" disabled>Stop Scan</button>
+    </div>
+    <label>
+        <input type="checkbox" id="connectableFilter" onchange="updateFilter()" checked>
+        Show only connectable devices
+    </label>
+    <div class="status-row">
+        <div id="status" class="status stopped">Ready to scan</div>
+        <span id="wsStatus" class="ws-status ws-disconnected">WS Off</span>
+    </div>
+</div>
+
+<div class="card device-list">
+    <h2>Discovered Devices <span id="deviceCount">0</span></h2>
+    <div id="devices"></div>
+</div>
+
+<div class="panel">
+    <div class="panel-header">Debug Log</div>
+    <div class="debug-controls">
+        <label class="debug-toggle">
+            <input type="checkbox" id="chkWsLog"> WebSocket messages
+        </label>
+        <div class="esp-log-group">
+            <label class="debug-toggle">
+                <input type="checkbox" id="chkEspLog"> ESP logs
+            </label>
+            <label class="debug-toggle" id="espInfoLogRow" style="display:none">
+                <input type="checkbox" id="chkEspInfoLog"> INFO logs
+            </label>
+            <div class="tag-manager" id="tagManagerPanel" style="display:none">
+                <div class="tag-manager-label">INFO tag filter</div>
+                <div class="tag-list" id="tagList">
+                    <span class="tag-list-empty" id="tagListEmpty">No tags — all INFO</span>
+                </div>
+                <div class="tag-add-row">
+                    <input type="text" id="newTagInput" placeholder="e.g. BLE scan">
+                    <button type="button" id="addTagBtn">Add</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div id="debugLog" class="debug-log">
+        <div class="log-entry log-I">000000 Debug log initialized</div>
+    </div>
+</div>
+<div id="textNotification" class="text-notification"></div>
+
+
+<!-- Connection Options Modal -->
+<div id="connectionModal" class="modal">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h2>Connection Options</h2>
+            <span class="close" onclick="closeModal()">&times;</span>
+        </div>
+        <div class="modal-body">
+            <div class="modal-device-info">
+                <div class="modal-device-name" id="modalDeviceName"></div>
+                <div class="modal-device-addr" id="modalDeviceAddr"></div>
+            </div>
+            <div class="option-section">
+                <h3>Service Discovery</h3>
+                <div class="option-row">
+                    <input type="checkbox" id="modalReadValues" checked onchange="updatePairingState()">
+                    <label for="modalReadValues">Read characteristic values</label>
+                </div>
+                <div class="option-description">Automatically read all readable characteristic values after discovery.</div>
+            </div>
+            <div class="option-section">
+                <h3>Pairing Behaviour</h3>
+                <div class="option-row">
+                    <label for="modalPairingMode">Perform pairing if required?</label>
+                    <select id="modalPairingMode" onchange="updateStrategyVisibility()">
+                        <option value="0" selected>No pairing</option>
+                        <option value="1">Probe only</option>
+                        <option value="2">Complete</option>
+                    </select>
+                </div>
+                <div id="strategySection">
+                    <div class="option-row">
+                        <label for="modalPairingStrategy">Pairing strategy</label>
+                        <select id="modalPairingStrategy" onchange="updatePinVisibility()">
+                            <option value="0">Legacy Just Works</option>
+                            <option value="1">SC Just Works</option>
+                            <option value="2">Legacy PIN</option>
+                            <option value="3">SC PIN</option>
+                            <option value="4" selected>AUTO</option>
+                        </select>
+                    </div>
+                    <div class="option-row" id="pinSection" style="display:none">
+                        <label for="modalPairingPin">Pairing PIN (6 digits)</label>
+                        <input type="text" id="modalPairingPin" value="123456"
+                               pattern="[0-9]{1,6}" maxlength="6" placeholder="Enter PIN">
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn-secondary" onclick="closeModal()">Cancel</button>
+            <button class="btn-success"   onclick="confirmConnection()">Connect</button>
+        </div>
+    </div>
+</div>
+
+<script>
+// ── state ──────────────────────────────────────────────
+let isScanning = false;
+let currentDeviceAddr = null;   // ← was currentDeviceId (int), now addr string
+let expandedDevices = new Set();
+let devices = {};               // keyed by addr
+
+// ── ADV parsing (unchanged from original) ──────────────
+const ADTypes = {
+    0x01:'Flags', 0x02:'Incomplete 16-bit UUIDs', 0x03:'Complete 16-bit UUIDs',
+    0x06:'Incomplete 128-bit UUIDs', 0x07:'Complete 128-bit UUIDs',
+    0x08:'Shortened Name', 0x09:'Complete Name', 0x0A:'Tx Power',
+    0x16:'Service Data', 0x19:'Appearance', 0xFF:'Manufacturer Specific'
+};
+
+function safeToString(v) { try { return v == null ? '' : String(v); } catch(e) { return ''; } }
+function escapeHtml(t)   { const d = document.createElement('div'); d.textContent = t; return d.innerHTML; }
+function getRssiClass(r) { return r>=-50?'rssi-excellent':r>=-65?'rssi-good':r>=-80?'rssi-fair':'rssi-poor'; }
+
+function hexToBytes(hex) {
+    try {
+        const b = [];
+        for (let i=0; i<hex.length; i+=2) b.push(parseInt(hex.substr(i,2),16));
+        return b;
+    } catch(e) { return []; }
+}
+function bytesToHex(b) {
+    if (!b||!b.length) return '';
+    return Array.from(b).map(x=>safeToString(x?.toString(16).padStart(2,'0'))).join('').toUpperCase();
+}
+function parseUUID16(b,off) {
+    if (!b||off+1>=b.length) return null;
+    return safeToString(((b[off+1]<<8)|b[off]).toString(16).padStart(4,'0').toUpperCase());
+}
+function decodeFlags(v) {
+    const f=[];
+    if(v&1)f.push('LE Limited'); if(v&2)f.push('LE General'); if(v&4)f.push('BR/EDR Not Supported');
+    return f.length?f.join(', '):'None';
+}
+function decodeAdvField(type, data) {
+    const n = typeof type==='number'?type:parseInt(type);
+    const typeName = ADTypes[n]||`Unknown (0x${safeToString(n.toString(16).padStart(2,'0'))})`;
+    if (!data||!data.length) return {typeName, decodedValue:'empty', rawHex:''};
+    let decoded = bytesToHex(data);
+    switch(n) {
+        case 0x01: decoded = decodeFlags(data[0]); break;
+        case 0x02: case 0x03: {
+            const u=[];
+            for(let i=0;i<data.length;i+=2){ const v=parseUUID16(data,i); if(v) u.push('0x'+v); }
+            decoded = u.join(', ')||bytesToHex(data); break;
+        }
+        case 0x08: case 0x09:
+            try { decoded = String.fromCharCode(...data); } catch(e) { decoded = bytesToHex(data); } break;
+        case 0x0A: { const p=data[0]>127?data[0]-256:data[0]; decoded=`${p} dBm`; break; }
+        case 0xFF:
+            if(data.length>=2){ const cid=(data[1]<<8)|data[0]; decoded=`Company: 0x${cid.toString(16).padStart(4,'0')}, Data: ${bytesToHex(data.slice(2))}`; }
+            break;
+    }
+    return {typeName, decodedValue: decoded, rawHex: bytesToHex(data)};
+}
+function parseAdvData(hex) {
+    if (!hex||!hex.length) return [];
+    const bytes = hexToBytes(hex.replace(/\s/g,''));
+    const fields = [];
+    let i=0;
+    while(i<bytes.length) {
+        const len=bytes[i]; if(!len||i+len>=bytes.length) break;
+        const type=bytes[i+1], data=bytes.slice(i+2,i+1+len);
+        fields.push({type,length:len,data,decoded:decodeAdvField(type,data)});
+        i+=len+1;
+    }
+    return fields;
+}
+
+// ── ADV section rendering (unchanged logic) ────────────
+function toggleAdvData(addr) {
+    const clean = addr.replace(/:/g,'');
+    const sec = document.getElementById('adv-'+clean);
+    const btn = document.getElementById('btn-'+clean);
+    if (!sec||!btn) return;
+    if (expandedDevices.has(addr)) {
+        expandedDevices.delete(addr);
+        sec.classList.remove('expanded');
+        btn.textContent = 'Show ADV';
+    } else {
+        expandedDevices.add(addr);
+        sec.classList.add('expanded');
+        btn.textContent = 'Hide ADV';
+    }
+}
+
+function createAdvSection(dev) {
+    const clean = safeToString(dev.addr).replace(/:/g,'');
+    const sec = document.createElement('div');
+    sec.className = 'adv-data-section';
+    sec.id = 'adv-'+clean;
+    if (expandedDevices.has(dev.addr)) sec.classList.add('expanded');
+
+    const appendFields = (hexData, label) => {
+        if (!hexData||!hexData.length) return;
+        const title = document.createElement('div');
+        title.className = 'adv-data-title';
+        title.textContent = label;
+        sec.appendChild(title);
+        const fields = parseAdvData(hexData);
+        fields.forEach(f => {
+            const fd = document.createElement('div'); fd.className='adv-field';
+            const td = document.createElement('div'); td.className='adv-field-type';
+            td.textContent = `${f.decoded.typeName} (0x${safeToString(f.type.toString(16).padStart(2,'0'))})`;
+            const vd = document.createElement('div'); vd.className='adv-field-value';
+            vd.textContent = f.decoded.decodedValue;
+            const hd = document.createElement('div'); hd.className='adv-field-hex';
+            hd.textContent = 'Raw: '+f.decoded.rawHex;
+            fd.append(td,vd,hd); sec.appendChild(fd);
+        });
+        const raw = document.createElement('div'); raw.className='raw-data';
+        raw.title='Click to copy';
+        raw.textContent = `Full ${label}: ${hexData}`;
+        raw.addEventListener('click', ()=>navigator.clipboard?.writeText(hexData));
+        sec.appendChild(raw);
+    };
+
+    appendFields(dev.adv_data, 'Advertising Data');
+    if (dev.has_scan_rsp) appendFields(dev.scan_rsp, 'Scan Response');
+    if (!sec.children.length) {
+        const nd=document.createElement('div'); nd.className='adv-field'; nd.textContent='No advertising data';
+        sec.appendChild(nd);
+    }
+    return sec;
+}
+
+// ── Device rendering ───────────────────────────────────
+function renderDevice(dev) {
+    const clean = safeToString(dev.addr).replace(/:/g,'');
+    let deviceDiv = document.getElementById('device-'+clean);
+    const isNew = !deviceDiv;
+
+    if (isNew) {
+        deviceDiv = document.createElement('div');
+        deviceDiv.className = 'device';
+        deviceDiv.id = 'device-'+clean;
+    }
+
+    deviceDiv.innerHTML = '';   // re-render in place on updates
+
+    const header = document.createElement('div'); header.className='device-header';
+
+    // RSSI column
+    const rssiDiv = document.createElement('div');
+    rssiDiv.className='device-rssi '+getRssiClass(dev.rssi);
+    rssiDiv.innerHTML = `<div class="rssi-value">${dev.rssi}</div><div class="rssi-label">dBm</div>`;
+
+    // Content column
+    const content = document.createElement('div'); content.className='device-content';
+    content.innerHTML = `
+        <div class="device-name">${escapeHtml(dev.name||'Unnamed')}</div>
+        <div class="device-addr">${escapeHtml(dev.addr)} · ${escapeHtml(dev.addr_type||'')}</div>
+        <div class="device-meta">${dev.is_connectable?'Connectable':'Not connectable'} · ${dev.is_extended?'Extended':'Legacy'} · PHY ${escapeHtml(dev.phy||'')}</div>
+        <div class="device-details">Adv ${dev.adv_len}/${dev.full_adv_len} bytes${dev.has_scan_rsp?' · Scan Rsp '+dev.scan_rsp_len+' bytes':''}</div>`;
+
+    // Action buttons
+    const actions = document.createElement('div'); actions.className='device-actions';
+
+    const expandBtn = document.createElement('button');
+    expandBtn.className='btn-secondary'; expandBtn.id='btn-'+clean;
+    expandBtn.textContent = expandedDevices.has(dev.addr)?'Hide ADV':'Show ADV';
+    expandBtn.addEventListener('click', ()=>toggleAdvData(dev.addr));
+
+    const connectBtn = document.createElement('button');
+    connectBtn.className='btn-success';
+    connectBtn.textContent='Connect';
+    connectBtn.disabled = !dev.is_connectable;
+    connectBtn.addEventListener('click', ()=>openConnectionModal(dev));
+
+    actions.append(expandBtn, connectBtn);
+    header.append(rssiDiv, content, actions);
+    deviceDiv.append(header, createAdvSection(dev));
+
+    if (isNew) {
+        // Insert sorted by RSSI
+        const container = document.getElementById('devices');
+        const existing = [...container.children];
+        const insertBefore = existing.find(el => {
+            const d = devices[el.id.replace('device-','').replace(/(..)/g,'$1:').slice(0,-1)];
+            return d && d.rssi < dev.rssi;
+        });
+        insertBefore ? container.insertBefore(deviceDiv, insertBefore) : container.appendChild(deviceDiv);
+    }
+}
+
+function updateDeviceCount() {
+    document.getElementById('deviceCount').textContent = Object.keys(devices).length;
+}
+
+// ── WebSocket message handler ──────────────────────────
+function handleWsMessage(cmd) {
+    if (cmd.type === 'scan_status') {
+        isScanning = cmd.scanning;
+        updateUIState(cmd.scanning);
+    }
+    else if (cmd.type === 'scan_device') {
+        devices[cmd.addr] = cmd;
+        renderDevice(cmd);
+        updateDeviceCount();
+    }
+    else if (cmd.type === 'scan_device_lost') {
+        const clean = cmd.addr.replace(/:/g, '');
+        delete devices[cmd.addr];
+        document.getElementById('device-' + clean)?.remove();
+        updateDeviceCount();
+    }
+    else if (cmd.type === 'notify') {
+        showTextNotification(cmd.text);
+    }
+    else if (cmd.type === 'log') {
+        addEspLog(cmd.level, cmd.tag, cmd.msg);   
+    }
+}
+
+
+// ── Scan controls ──────────────────────────────────────
+function startScan() {
+    isScanning = true;
+    wsReconnectGuard = () => true;
+    connectWebSocket();
+    const connectable = document.getElementById('connectableFilter').checked;
+    wsSend({ type: 'scanner', action: 'start', connectable });
+}
+
+function stopScan() {
+    wsSend({ type: 'scanner', action: 'stop' });
+}
+
+
+function updateFilter() {
+    if (isScanning) {
+        stopScan();
+        setTimeout(startScan, 500);
+    }
+}
+function updateUIState(scanning) {
+    document.getElementById('startBtn').disabled = scanning;
+    document.getElementById('stopBtn').disabled  = !scanning;
+    const s = document.getElementById('status');
+    s.className = scanning ? 'status scanning' : 'status stopped';
+    s.textContent = scanning ? 'Scanning...' : 'Scan stopped';
+}
+
+// ── Modal ──────────────────────────────────────────────
+function openConnectionModal(dev) {
+    currentDeviceAddr = dev.addr; 
+    document.getElementById('modalDeviceName').textContent = dev.name || 'Unnamed Device';
+    document.getElementById('modalDeviceAddr').textContent = `${dev.addr} · ${dev.addr_type}`;
+    document.getElementById('modalReadValues').checked = true;
+    document.getElementById('modalPairingMode').value = '0';
+    document.getElementById('modalPairingMode').disabled = false;
+    document.getElementById('modalPairingStrategy').value = '4';
+    document.getElementById('modalPairingPin').value = '123456';
+    updateStrategyVisibility();
+    document.getElementById('connectionModal').style.display = 'block';
+}
+function closeModal() {
+    document.getElementById('connectionModal').style.display = 'none';
+    currentDeviceAddr = null;
+}
+function updatePairingState() {
+    const rv = document.getElementById('modalReadValues').checked;
+    const pm = document.getElementById('modalPairingMode');
+    pm.disabled = !rv;
+    if (!rv) pm.value = '0';
+    updateStrategyVisibility();
+}
+function updateStrategyVisibility() {
+    const pm = document.getElementById('modalPairingMode').value;
+    const rv = document.getElementById('modalReadValues').checked;
+    document.getElementById('strategySection').style.display = (rv && pm==='2') ? 'block' : 'none';
+    updatePinVisibility();
+}
+function updatePinVisibility() {
+    const s = document.getElementById('modalPairingStrategy').value;
+    document.getElementById('pinSection').style.display = (s==='2'||s==='3') ? 'block' : 'none';
+}
+
+function confirmConnection() {
+    if (!currentDeviceAddr) { closeModal(); return; }
+    const readValues  = document.getElementById('modalReadValues').checked;
+    const pairingMode = parseInt(document.getElementById('modalPairingMode').value);
+    const strategy    = parseInt(document.getElementById('modalPairingStrategy').value);
+    const pin         = parseInt(document.getElementById('modalPairingPin').value);
+
+    if ((strategy===2||strategy===3) && readValues && pairingMode===2) {
+        if (isNaN(pin)||pin<0||pin>999999) { alert('Invalid PIN. Must be 0–999999.'); return; }
+    }
+
+//    wsSend({ type:'scanner', action:'connect', addr: currentDeviceAddr,  
+//            "save_result": false, "open_central": true,
+//             read_values: readValues, pairing_mode: pairingMode, strategy, pin });
+    wsSend({ type:'scanner', action:'connect', addr: currentDeviceAddr,  
+            "save_result": false, "open_central": true,
+             "read_values": false, "pairing_mode": 0, "strategy": 0, "pin" : 123456 });
+
+
+    closeModal();
+}
+
+
+window.onclick = e => { if (e.target.id==='connectionModal') closeModal(); };
+document.addEventListener('keydown', e => { if (e.key==='Escape') closeModal(); });
+
+// ─────────────────────────────────────────────
+// Init
+// ─────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+    wsReconnectGuard = () => true; // always reconnect (optionally consider: => isScanning)
+    connectWebSocket();
+    setTimeout(() => wsSend({ type: 'scanner', action: 'status' }), 300);
+
+    document.getElementById('modalPairingMode').addEventListener('change', updateStrategyVisibility);
+    document.getElementById('modalReadValues').addEventListener('change', updateStrategyVisibility);
+    document.getElementById('modalPairingStrategy').addEventListener('change', updatePinVisibility);
+    loadWslogFilter();
+});
+
+</script>

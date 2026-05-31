@@ -1,0 +1,42 @@
+menu "BLESPLOIT board"
+
+choice BLESPLOIT_BOARD
+    prompt "Target board"
+    default BLESPLOIT_BOARD_M5STICKS3
+    help
+        Select the hardware this firmware is built for. Must match sdkconfig.defaults.* fragment for CI.
+
+config BLESPLOIT_BOARD_M5STICKS3
+    bool "M5StickS3"
+
+config BLESPLOIT_BOARD_LILYGO_T_QT_PRO
+    bool "LilyGO T-QT Pro"
+
+config BLESPLOIT_BOARD_BARE
+    bool "Bare / generic (no panel)"
+
+endchoice
+
+config BLESPLOIT_DISPLAY_WIDTH
+    int "Logical display width (graphics / LVGL layout)"
+    default 135
+    range 1 1024
+    help
+        Pixel width used by graphics layer and LVGL. Should match the physical panel when a display is present.
+
+config BLESPLOIT_DISPLAY_HEIGHT
+    int "Logical display height (graphics / LVGL layout)"
+    default 240
+    range 1 1024
+
+config BLESPLOIT_BUTTON_MAIN_GPIO
+    int "Main physical button GPIO (-1 if none)"
+    default 11
+    range -1 48
+
+config BLESPLOIT_BUTTON_SECOND_GPIO
+    int "Second physical button GPIO (-1 if none)"
+    default 12
+    range -1 48
+
+endmenu

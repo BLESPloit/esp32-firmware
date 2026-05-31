@@ -1,0 +1,29 @@
+diff --git a/components/bt/host/nimble/nimble/nimble/host/src/ble_gap.c b/components/bt/host/nimble/nimble/nimble/host/src/ble_gap.c
+--- a/components/bt/host/nimble/nimble/nimble/host/src/ble_gap.c
++++ b/components/bt/host/nimble/nimble/nimble/host/src/ble_gap.c
+@@ -3519,24 +3519,7 @@ ble_gap_ext_adv_set_addr(uint8_t instance, const ble_addr_t *addr)
+     memset(&invalid_non_rpa_addr.val, 0xff, BLE_DEV_ADDR_LEN);
+     memset(&invalid_static_rand_addr.val, 0x00, BLE_DEV_ADDR_LEN);
+ 
+-    if ((addr->val[5] & BLE_STATIC_RAND_ADDR_MASK) == BLE_STATIC_RAND_ADDR_MASK) {
+-        invalid_static_rand_addr.val[5] = invalid_static_rand_addr.val[5] | BLE_STATIC_RAND_ADDR_MASK;
+-
+-        if (memcmp(invalid_non_rpa_addr.val, addr->val, BLE_DEV_ADDR_LEN) == 0 ||
+-            memcmp(invalid_static_rand_addr.val, addr->val, BLE_DEV_ADDR_LEN) == 0) {
+-            return BLE_HS_EINVAL;
+-        }
+-    } else if ((addr->val[5] | BLE_NON_RPA_MASK) == BLE_NON_RPA_MASK) {
+-        invalid_non_rpa_addr.val[5] = invalid_non_rpa_addr.val[5] & BLE_NON_RPA_MASK;
+-
+-        if (memcmp(invalid_non_rpa_addr.val, addr->val, BLE_DEV_ADDR_LEN) == 0 ||
+-            memcmp(invalid_static_rand_addr.val, addr->val, BLE_DEV_ADDR_LEN) == 0) {
+-            return BLE_HS_EINVAL;
+-        }
+-    } else {
+-        BLE_HS_LOG(ERROR, "Invalid random address \n");
+-        return BLE_HS_EINVAL;
+-    }
++    BLE_HS_LOG(INFO, "[BLESPlo.it patch] Bypassing address type check\n");
+ 
+     ble_hs_lock();
+     rc = ble_gap_ext_adv_set_addr_no_lock(instance, addr->val);

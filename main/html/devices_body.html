@@ -1,0 +1,274 @@
+<script>document.title = "Device List";</script>
+<style>
+.sim-status-bar {
+  padding: 10px 16px;
+  background: var(--color-panel-tint);
+  border-radius: 6px;
+  margin-bottom: 16px;
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.sim-status-bar.active {
+  background: #fff3cd;
+  border-left: 4px solid #ff9800;
+  font-weight: bold;
+}
+.devices-loading { padding: 20px; color: #888; font-style: italic; }
+.devices-empty   { padding: 20px; color: #888; }
+
+.devices-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: white;
+  border-radius: 6px;
+  overflow: hidden;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.08);
+  table-layout: auto;
+}
+/* Let the page content area use full width */
+.container { max-width: 100% !important; padding: 16px 24px; }
+.devices-table th {
+  background: var(--color-brand);
+  color: white;
+  padding: 10px 12px;
+  text-align: left;
+  font-weight: 600;
+}
+.devices-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid #eee;
+  vertical-align: middle;
+}
+.devices-table tr:last-child td { border-bottom: none; }
+.devices-table tr:hover td { background: #f9f9f9; }
+.devices-table tr.simulating td {
+  background: #fffde7;
+  font-weight: bold;
+}
+.devices-table tr.simulating { border-left: 4px solid #ff9800; }
+
+.icon-cell img { width: 48px; height: 48px; object-fit: contain; display: block; }
+.icon-cell     { width: 60px; }
+.name-cell a   { color: var(--color-brand); text-decoration: none; font-weight: 500; }
+.name-cell a:hover { text-decoration: underline; }
+.desc-cell     { color: #666; font-size: 13px; }
+.actions-cell  { min-width: 220px; }
+.actions-cell .btn { margin: 2px 2px; }
+
+.btn-edit     { background: var(--color-brand-accent); }
+.btn-simulate { background: #ff9800; }
+.btn-open     { background: #4CAF50; }
+.btn-stop     { background: #f44336; }
+.btn-delete   { background: #7b1fa2; }
+.btn-delete:hover { background: #6a1090; }
+.btn-edit:hover     { background: var(--color-brand-hover); }
+.btn-simulate:hover { background: #e68900; }
+.btn-open:hover     { background: #388E3C; }
+.btn-stop:hover     { background: #d32f2f; }
+</style>
+
+<div class="container">
+
+  <div class="header">
+    <div class="device-info">
+      <h1>BLE Devices</h1>
+    </div>
+    <span id="wsStatus" class="ws-status ws-disconnected">WS Off</span>
+  </div>
+
+  <!-- Simulation status bar -->
+  <div id="simStatusBar" class="sim-status-bar">
+    <span id="simStatusText">No simulation running</span>
+  </div>
+
+  <div id="devicesContent" class="devices-loading">Loading devices&hellip;</div>
+
+  <div id="textNotification" class="text-notification"></div>
+
+</div><!-- /.container -->
+
+<script>
+// ─────────────────────────────────────────────
+// State
+// ─────────────────────────────────────────────
+let currentSimulation = null;   // folder name of currently simulated device, or null
+let _lastDevices   = null;       // cached device list for re-render on sim state change
+
+// ─────────────────────────────────────────────
+// WebSocket message handler (called by common.js)
+// ─────────────────────────────────────────────
+function handleWsMessage(cmd) {
+  switch (cmd.type) {
+
+    case 'devices_list':
+      if (Array.isArray(cmd.devices)) displayDevices(cmd.devices);
+      break;
+
+    case 'sim_status':
+      if (cmd.status === 'started' && cmd.device) {
+        currentSimulation = cmd.device;
+      } else if (cmd.status === 'stopped') {
+        currentSimulation = null;
+      }
+      updateSimStatusBar();
+      if (_lastDevices) displayDevices(_lastDevices);  // re-render with updated sim state
+      else refreshRowStates();
+      break;
+
+    case 'notify': showTextNotification(cmd.text || ''); break;
+    case 'log':    addEspLog(cmd.level, cmd.tag, cmd.msg); break;
+    default: break;
+  }
+}
+
+// ─────────────────────────────────────────────
+// Sim status bar
+// ─────────────────────────────────────────────
+function updateSimStatusBar() {
+  const bar  = document.getElementById('simStatusBar');
+  const text = document.getElementById('simStatusText');
+  if (currentSimulation) {
+    text.innerHTML = `Simulating: <a href="/sim/${encodeURIComponent(currentSimulation)}" style="color:inherit;font-weight:bold;">${escHtml(currentSimulation)}</a>`;
+    bar.classList.add('active');
+  } else {
+    text.textContent = 'No simulation running';
+    bar.classList.remove('active');
+  }
+}
+
+// Refresh Simulate/Stop button states and row highlight without re-rendering
+function refreshRowStates() {
+  document.querySelectorAll('tr[data-folder]').forEach(row => {
+    const folder      = row.getAttribute('data-folder');
+    const isThis      = folder === currentSimulation;
+    const anyRunning  = currentSimulation !== null;
+    row.classList.toggle('simulating', isThis);
+    const simBtn  = row.querySelector('button.btn-simulate');
+    const openBtn = row.querySelector('button.btn-open');
+    const stopBtn = row.querySelector('button.btn-stop');
+    const delBtn  = row.querySelector('button.btn-delete');
+    if (simBtn)  { simBtn.disabled  = anyRunning;  simBtn.textContent = isThis ? 'Simulating' : 'Simulate'; }
+    if (openBtn) { openBtn.disabled = !isThis; }
+    if (stopBtn) { stopBtn.disabled = !isThis; }
+    if (delBtn)  { delBtn.disabled  = isThis; }
+  });
+}
+
+// ─────────────────────────────────────────────
+// Simulation actions
+// ─────────────────────────────────────────────
+function simulateDevice(folder) {
+  wsSend({ type: 'sim', action: 'start', device: folder });
+}
+
+function stopSimulation() {
+  wsSend({ type: 'sim', action: 'stop' });
+}
+
+function openSimPage(folder) {
+  if (window.parent !== window && typeof window.parent.navigate === 'function') {
+    // Inside index.html iframe — ask parent to switch to the sim page
+    window.parent.navigate('sim');
+  } else {
+    // Standalone (direct /devices URL) — navigate normally
+    window.location.href = `/sim/${encodeURIComponent(folder)}`;
+  }
+}
+
+async function deleteDevice(folder) {
+  if (!confirm(`Delete device "${folder}"? This cannot be undone.`)) return;
+  try {
+    const r = await fetch(`/fs/rmdir?path=devices/${encodeURIComponent(folder)}`);
+    const j = await r.json();
+    if (j.ok) {
+      showTextNotification(`Deleted ${folder}`);
+      wsSend({ type: 'devices', action: 'list' });
+    } else {
+      alert(`Delete failed: ${j.error || 'unknown error'}`);
+    }
+  } catch (e) {
+    alert(`Delete failed: ${e.message}`);
+  }
+}
+
+// ─────────────────────────────────────────────
+// Device list rendering
+// ─────────────────────────────────────────────
+function displayDevices(devices) {
+  _lastDevices = devices;
+  const content = document.getElementById('devicesContent');
+
+  if (!devices.length) {
+    content.innerHTML = '<p class="devices-empty">No devices found. Upload a device definition for example from the mobile app.</p>';
+    return;
+  }
+
+  let html = `
+    <table class="devices-table">
+      <thead>
+        <tr>
+          <th></th>
+          <th>Name</th>
+          <th>Description</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>`;
+
+  devices.forEach(device => {
+    const folder     = device.folder || '';
+    const f          = escHtml(folder);        // safe for HTML attrs/content
+    const name       = escHtml(device.name || folder);
+    const desc       = escHtml(device.description || '');
+    const isThis     = folder === currentSimulation;
+    const anyRunning = currentSimulation !== null;
+    const rowClass   = isThis ? ' class="simulating"' : '';
+
+    // Use data-folder for JS lookups; raw folder name in onclick (no special chars in fs names)
+    html += `
+        <tr${rowClass} data-folder="${f}">
+          <td class="icon-cell">
+            <img src="/static/${f}/icon" alt="${name} icon"
+                 onerror="this.style.display='none'">
+          </td>
+          <td class="name-cell"><a href="/device/${f}">${name}</a></td>
+          <td class="desc-cell">${desc}</td>
+          <td class="actions-cell">
+            <button class="btn btn-edit"     data-folder="${f}" onclick="location.href='/device/'+this.dataset.folder">Edit</button>
+            <button class="btn btn-simulate" data-folder="${f}" onclick="simulateDevice(this.dataset.folder)"
+                    ${anyRunning ? 'disabled' : ''}>${isThis ? 'Simulating' : 'Simulate'}</button>
+            <button class="btn btn-open"     data-folder="${f}" onclick="openSimPage(this.dataset.folder)"
+                    ${!isThis ? 'disabled' : ''}>Open</button>
+            <button class="btn btn-stop"     onclick="stopSimulation()"
+                    ${!isThis ? 'disabled' : ''}>Stop</button>
+            <button class="btn btn-delete"   data-folder="${f}" onclick="deleteDevice(this.dataset.folder)"
+                    ${isThis ? 'disabled' : ''}>Delete</button>
+          </td>
+        </tr>`;
+  });
+
+  html += `
+      </tbody>
+    </table>`;
+
+  content.innerHTML = html;
+}
+
+// ─────────────────────────────────────────────
+// Init
+// ─────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+  wsReconnectGuard = () => true;
+
+  connectWebSocket();
+
+  // Delay matches scan_body.html pattern — gives the WS handshake time to complete
+  // before sending, avoiding the race between CONNECTING state and wsSend's queue logic.
+  setTimeout(() => {
+    wsSend({ type: 'sim',     action: 'status' });
+    wsSend({ type: 'devices', action: 'list'   });
+  }, 300);
+});
+</script>

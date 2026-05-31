@@ -1,0 +1,288 @@
+<script>document.title = 'File Manager';</script>
+<style>
+  body { font-family: Arial, sans-serif; margin: 0; background: #f0f0f0; }
+  .container { max-width: 860px; margin: 0 auto; padding: 16px; }
+  h1 { margin: 0 0 12px; color: #333; border-bottom: 2px solid #006EAB; padding-bottom: 8px; }
+  .fm-toolbar { display:flex; gap:8px; align-items:center; margin-bottom:10px; flex-wrap:wrap; }
+  .fm-path { font-family:monospace; background:#e8f4f8; padding:6px 10px;
+             border-radius:4px; flex:1; min-width:0; overflow:hidden;
+             text-overflow:ellipsis; white-space:nowrap; }
+  .fm-storage { display:flex; gap:12px; align-items:center; background:#f5f5f5;
+                border-radius:4px; padding:8px 12px; margin-bottom:10px; font-size:.9em; }
+  .fm-bar-wrap { background:#ddd; border-radius:3px; height:8px; width:120px; overflow:hidden; }
+  .fm-bar { height:100%; background:#006EAB; transition:width .3s; }
+  .fm-bar.warn { background:#e08000; }
+  .fm-bar.crit { background:#cc0000; }
+  table { width:100%; border-collapse:collapse; background:#fff;
+          border-radius:6px; overflow:hidden; box-shadow:0 1px 3px rgba(0,0,0,.1); }
+  th { background:#006EAB; color:#fff; padding:9px 10px; text-align:left; }
+  td { padding:9px 10px; border-bottom:1px solid #eee; }
+  tr:last-child td { border-bottom:none; }
+  tr:hover td { background:#f9f9f9; }
+  td:last-child { white-space:nowrap; text-align:right; }
+  .btn { display:inline-block; padding:5px 11px; border:none; border-radius:3px;
+         cursor:pointer; font-size:.82em; background:#006EAB; color:#fff; }
+  .btn:hover { background:#005a8f; }
+  .btn.mild   { background:#777; }
+  .btn.mild:hover { background:#555; }
+  .btn.danger { background:#c00; }
+  .btn.danger:hover { background:#900; }
+  .btn:disabled { opacity:.5; cursor:default; }
+  #fm-status { min-height:1.4em; font-size:.85em; margin:4px 0 8px;
+               color:#c00; }
+  /* modal */
+  #fm-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,.45);
+                z-index:50; align-items:center; justify-content:center; }
+  #fm-overlay.open { display:flex; }
+  #fm-modal { background:#fff; border-radius:6px; padding:20px 24px;
+              min-width:280px; box-shadow:0 4px 16px rgba(0,0,0,.25); }
+  #fm-modal h3 { margin:0 0 12px; }
+  #fm-modal input { width:100%; box-sizing:border-box; padding:7px 9px;
+                    border:1px solid #ccc; border-radius:3px; font-size:1em; }
+  .modal-btns { display:flex; gap:8px; justify-content:flex-end; margin-top:12px; }
+  /* upload progress */
+  #fm-progress { display:none; margin:8px 0; }
+  #fm-progress progress { width:100%; }
+</style>
+
+<div class="container">
+  <h1>📁 File Manager</h1>
+
+  <div class="fm-storage">
+    <span id="fm-df-text">—</span>
+    <div class="fm-bar-wrap"><div class="fm-bar" id="fm-bar" style="width:0"></div></div>
+  </div>
+
+  <div class="fm-toolbar">
+    <span class="fm-path" id="fm-cwd">/</span>
+    <button class="btn mild" onclick="fmUp()">⬆ Up</button>
+    <button class="btn"      onclick="fmShowMkdir()">📁 New folder</button>
+    <button class="btn"      onclick="fmShowUpload()">📤 Upload</button>
+    <button class="btn mild" onclick="fmLoad(cwd)">↻</button>
+  </div>
+
+  <div id="fm-status"></div>
+  <div id="fm-progress"><progress id="fm-prog-bar" value="0" max="100"></progress> <span id="fm-prog-pct"></span></div>
+
+  <table>
+    <thead><tr><th>Name</th><th>Size</th><th>Actions</th></tr></thead>
+    <tbody id="fm-tbody"><tr><td colspan="3">Loading…</td></tr></tbody>
+  </table>
+</div>
+
+<!-- Rename / mkdir modal -->
+<div id="fm-overlay">
+  <div id="fm-modal">
+    <h3 id="fm-modal-title">New folder</h3>
+    <input type="text" id="fm-modal-input" autocomplete="off">
+    <div class="modal-btns">
+      <button class="btn mild" onclick="fmModalClose()">Cancel</button>
+      <button class="btn"      onclick="fmModalOk()">OK</button>
+    </div>
+  </div>
+</div>
+
+<!-- Hidden upload form fallback (used for submit, XHR intercepts it) -->
+<input type="file" id="fm-file-input" style="display:none" onchange="fmUploadFile(this)">
+
+<script>
+(function () {
+  'use strict';
+
+  let cwd = '/';
+  let modalMode  = '';     // 'mkdir' | 'rename'
+  let renameFrom = '';
+
+  /* ── helpers ─────────────────────────────────────────────────── */
+  function esc(s)     { return s.replace(/'/g, "\\'"); }
+  function escH(s)    { const d=document.createElement('span'); d.textContent=s; return d.innerHTML; }
+  function fmtSize(b) {
+    if (b == null) return '—';
+    if (b < 1024)      return b + ' B';
+    if (b < 1048576)   return (b/1024).toFixed(1) + ' KB';
+    return (b/1048576).toFixed(2) + ' MB';
+  }
+  function status(msg, isErr) {
+    const el = document.getElementById('fm-status');
+    el.textContent = msg;
+    el.style.color = isErr ? '#c00' : '#080';
+  }
+
+  /* ── API calls ────────────────────────────────────────────────── */
+  async function apiFetch(url, opts) {
+    const r = await fetch(url, opts);
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }
+
+  async function fmLoad(path) {
+    cwd = path || '/';
+    document.getElementById('fm-cwd').textContent = cwd;
+    status('');
+    try {
+      const [ls, df] = await Promise.all([
+        apiFetch('/fs/ls?path=' + encodeURIComponent(cwd)),
+        apiFetch('/fs/df')
+      ]);
+      fmRenderDf(df);
+      fmRender(ls);
+    } catch(e) { status('Load failed: ' + e.message, true); }
+  }
+
+  /* ── render ───────────────────────────────────────────────────── */
+  function fmRender(ls) {
+    const tbody = document.getElementById('fm-tbody');
+    const rows  = [];
+
+    if (cwd !== '/') {
+      const par = cwd.replace(/\/[^/]+$/, '') || '/';
+      rows.push(`<tr><td colspan="2"><a href="#" onclick="fmLoad('${esc(par)}');return false">📁 ..</a></td><td></td></tr>`);
+    }
+
+    const entries = (ls.entries || []).slice().sort((a,b) => {
+      if (a.type !== b.type) return a.type==='dir' ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+
+    for (const e of entries) {
+      const icon  = e.type === 'dir' ? '📁' : '📄';
+      const size  = e.type === 'file' ? fmtSize(e.size) : '—';
+      const click = e.type === 'dir'
+        ? `fmLoad('${esc(e.path)}');return false`
+        : `fmDownload('${esc(e.path)}');return false`;
+      const dlBtn = e.type === 'file'
+        ? `<button class="btn mild" onclick="fmDownload('${esc(e.path)}')">⬇</button> ` : '';
+      rows.push(`
+        <tr>
+          <td><a href="#" onclick="${click}">${icon} ${escH(e.name)}</a></td>
+          <td>${size}</td>
+          <td>
+            ${dlBtn}
+            <button class="btn mild"   onclick="fmRename('${esc(e.path)}')">✏</button>
+            <button class="btn danger" onclick="fmDelete('${esc(e.path)}','${e.type}')">✕</button>
+          </td>
+        </tr>`);
+    }
+
+    if (!rows.length) rows.push('<tr><td colspan="3" style="color:#999;text-align:center">Empty folder</td></tr>');
+    tbody.innerHTML = rows.join('');
+  }
+
+  function fmRenderDf(df) {
+    const pct = df.total_bytes > 0 ? df.used_bytes / df.total_bytes * 100 : 0;
+    const bar = document.getElementById('fm-bar');
+    bar.style.width = pct.toFixed(1) + '%';
+    bar.className   = 'fm-bar' + (pct>=90?' crit': pct>=75?' warn':'');
+    document.getElementById('fm-df-text').textContent =
+      fmtSize(df.used_bytes) + ' / ' + fmtSize(df.total_bytes) +
+      ' (' + pct.toFixed(1) + '% used — ' + fmtSize(df.free_bytes) + ' free)';
+  }
+
+  /* ── actions ──────────────────────────────────────────────────── */
+  window.fmLoad    = fmLoad;
+  window.fmUp      = () => fmLoad(cwd === '/' ? '/' : cwd.replace(/\/[^/]+$/, '') || '/');
+
+  window.fmDownload = path =>
+    window.location.assign('/fs/download?path=' + encodeURIComponent(path));
+
+  window.fmDelete = async (path, type) => {
+    if (!confirm('Delete ' + path + '?')) return;
+    try {
+      if (type === 'dir')
+        await apiFetch('/fs/rmdir?path=' + encodeURIComponent(path));
+      else
+        await apiFetch('/fs/delete?path=' + encodeURIComponent(path) + '&type=file');
+      status('Deleted ' + path);
+      fmLoad(cwd);
+    } catch(e) { status('Delete failed: ' + e.message, true); }
+  };
+
+  window.fmRename = path => {
+    renameFrom = path;
+    modalMode  = 'rename';
+    document.getElementById('fm-modal-title').textContent = 'Rename';
+    document.getElementById('fm-modal-input').value = path.split('/').pop();
+    fmModalOpen();
+  };
+
+  window.fmShowMkdir = () => {
+    modalMode = 'mkdir';
+    document.getElementById('fm-modal-title').textContent = 'New folder name';
+    document.getElementById('fm-modal-input').value = '';
+    fmModalOpen();
+  };
+
+  window.fmModalClose = fmModalClose;
+  window.fmModalOk    = fmModalOk;
+
+  function fmModalOpen()  { document.getElementById('fm-overlay').classList.add('open');
+                            document.getElementById('fm-modal-input').focus(); }
+  function fmModalClose() { document.getElementById('fm-overlay').classList.remove('open'); }
+
+  async function fmModalOk() {
+    const val = document.getElementById('fm-modal-input').value.trim();
+    if (!val) return;
+    fmModalClose();
+    try {
+      if (modalMode === 'mkdir') {
+        const path = (cwd === '/' ? '' : cwd) + '/' + val;
+        await apiFetch('/fs/mkdir', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: 'current_dir=' + encodeURIComponent(cwd) + '&folder_name=' + encodeURIComponent(val)
+        });
+        status('Created ' + val);
+      } else {
+        const dir = renameFrom.replace(/\/[^/]+$/, '') || '/';
+        const to  = (dir === '/' ? '' : dir) + '/' + val;
+        await apiFetch('/fs/rename?from=' + encodeURIComponent(renameFrom) + '&to=' + encodeURIComponent(to));
+        status('Renamed to ' + val);
+      }
+      fmLoad(cwd);
+    } catch(e) { status((modalMode==='mkdir'?'Mkdir':'Rename') + ' failed: ' + e.message, true); }
+  }
+
+  document.getElementById('fm-modal-input')
+    .addEventListener('keydown', e => { if (e.key === 'Enter') fmModalOk(); });
+  document.getElementById('fm-overlay')
+    .addEventListener('click', e => { if (e.target.id === 'fm-overlay') fmModalClose(); });
+
+  /* ── upload via XHR so we can show progress ───────────────────── */
+  window.fmShowUpload = () => document.getElementById('fm-file-input').click();
+
+  window.fmUploadFile = function(input) {
+    if (!input.files.length) return;
+    const file = input.files[0];
+    const fd   = new FormData();
+    fd.append('current_dir', cwd);
+    fd.append('file', file);
+
+    const xhr  = new XMLHttpRequest();
+    const prog = document.getElementById('fm-progress');
+    const bar  = document.getElementById('fm-prog-bar');
+    const pct  = document.getElementById('fm-prog-pct');
+
+    prog.style.display = 'block';
+    xhr.upload.onprogress = e => {
+      if (e.lengthComputable) {
+        const p = Math.round(e.loaded/e.total*100);
+        bar.value = p;
+        pct.textContent = p + '%';
+      }
+    };
+    xhr.onload = () => {
+      prog.style.display = 'none';
+      input.value = '';
+      if (xhr.status < 400) { status('Uploaded ' + file.name); fmLoad(cwd); }
+      else status('Upload failed: HTTP ' + xhr.status, true);
+    };
+    xhr.onerror = () => { prog.style.display='none'; status('Upload error', true); };
+    xhr.open('POST', '/fs/upload');
+    xhr.send(fd);
+  };
+
+  /* ── boot ─────────────────────────────────────────────────────── */
+  fmLoad('/');
+})();
+</script>
+</body></html>

@@ -1,0 +1,65 @@
+name: build
+
+on:
+  push:
+    branches: [ "**" ]
+  pull_request:
+    branches: [ "**" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: m5stack_m5sticks3
+            sdkconfig_defaults: "sdkconfig.defaults;sdkconfig.defaults.m5stack_m5sticks3"
+          - name: lilygo_t_qt_pro
+            sdkconfig_defaults: "sdkconfig.defaults;sdkconfig.defaults.lilygo_t_qt_pro"
+          - name: bare_esp32s3
+            sdkconfig_defaults: "sdkconfig.defaults"
+
+    container:
+      image: espressif/idf:v5.3.1
+
+    defaults:
+      run:
+        working-directory: ${{ github.workspace }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4.2.2
+
+      - name: Apply IDF patches (NimBLE)
+        shell: bash
+        run: bash patches/apply-idf-patches.sh
+
+      - name: Build and merge
+        env:
+          SDKCONFIG_DEFAULTS: ${{ matrix.sdkconfig_defaults }}
+        run: |
+          . "${IDF_PATH}/export.sh"
+
+          VERSION=$(grep -oP '(?<=VERSION )\d+\.\d+\.\d+' CMakeLists.txt)
+
+          idf.py -B "build-${{ matrix.name }}" \
+                 -D "SDKCONFIG_DEFAULTS=${SDKCONFIG_DEFAULTS}" \
+                 -D "SDKCONFIG=build-${{ matrix.name }}/sdkconfig" \
+                 build
+
+          cp "build-${{ matrix.name }}/BLESPloit.bin" \
+             "build-${{ matrix.name }}/${{ matrix.name }}_${VERSION}_app.bin"
+
+          idf.py -B "build-${{ matrix.name }}" merge-bin \
+                 -o "${{ matrix.name }}_${VERSION}_merged.bin"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: firmware-${{ matrix.name }}
+          path: |
+            build-${{ matrix.name }}/flasher_args.json
+            build-${{ matrix.name }}/${{ matrix.name }}_*_app.bin
+            build-${{ matrix.name }}/${{ matrix.name }}_*_merged.bin

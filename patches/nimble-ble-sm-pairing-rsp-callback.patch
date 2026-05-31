@@ -1,0 +1,96 @@
+diff --git a/components/bt/host/nimble/nimble/nimble/host/include/host/ble_sm.h b/components/bt/host/nimble/nimble/nimble/host/include/host/ble_sm.h
+index ff381cf..39a6f92 100644
+--- a/components/bt/host/nimble/nimble/nimble/host/include/host/ble_sm.h
++++ b/components/bt/host/nimble/nimble/nimble/host/include/host/ble_sm.h
+@@ -119,6 +119,42 @@ int ble_sm_inject_io(uint16_t conn_handle, struct ble_sm_io *pkey);
+     ((void)(conn_handle), BLE_HS_ENOTSUP)
+ #endif
+ 
++//
++// BLESPlo.it patch to capture raw pairing response
++//
++/**
++ * Pairing command/response structure - public copy of private ble_sm_pair_cmd for callbacks
++ */
++struct ble_sm_pairing_params {
++    uint8_t io_cap;
++    uint8_t oob_data_flag;
++    uint8_t authreq;
++    uint8_t max_enc_key_size;
++    uint8_t init_key_dist;
++    uint8_t resp_key_dist;
++} __attribute__((packed));
++
++/**
++ * Callback to receive raw pairing response data
++ *
++ * @param conn_handle   Connection handle for the pairing
++ * @param rsp           Pointer to the pairing response command structure
++ * @param arg           Optional argument passed to callback
++ */
++typedef void (*ble_sm_pairing_rsp_fn)(uint16_t conn_handle, 
++                                      const struct ble_sm_pairing_params *rsp, 
++                                      void *arg);
++
++/**
++ * Set callback to receive pairing response packet
++ *
++ * @param cb        The callback function
++ * @param arg       Optional argument to pass to callback
++ */
++void ble_sm_set_pairing_rsp_cb(ble_sm_pairing_rsp_fn cb, void *arg);
++
++
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/components/bt/host/nimble/nimble/nimble/host/src/ble_sm.c b/components/bt/host/nimble/nimble/nimble/host/src/ble_sm.c
+index 0fccda9..32b68b4 100644
+--- a/components/bt/host/nimble/nimble/nimble/host/src/ble_sm.c
++++ b/components/bt/host/nimble/nimble/nimble/host/src/ble_sm.c
+@@ -105,6 +105,11 @@ static ble_sm_rx_fn * const ble_sm_dispatch[] = {
+ #endif
+ };
+ 
++// BLESPlo.it patch 
++static ble_sm_pairing_rsp_fn ble_sm_pairing_rsp_cb = NULL;
++static void *ble_sm_pairing_rsp_cb_arg = NULL;
++
++
+ struct hci_start_encrypt
+ {
+     uint16_t connection_handle;
+@@ -1297,6 +1302,16 @@ ble_sm_enc_key_refresh_rx(const struct ble_hci_ev_enc_key_refresh *ev)
+     ble_sm_enc_event_rx(le16toh(ev->conn_handle), ev->status, 1);
+ }
+ 
++
++// BLESPlo.it patch
++void
++ble_sm_set_pairing_rsp_cb(ble_sm_pairing_rsp_fn cb, void *arg)
++{
++    ble_sm_pairing_rsp_cb = cb;
++    ble_sm_pairing_rsp_cb_arg = arg;
++}
++
++
+ /*****************************************************************************
+  * $ltk                                                                      *
+  *****************************************************************************/
+@@ -1992,6 +2007,15 @@ ble_sm_pair_rsp_rx(uint16_t conn_handle, struct os_mbuf **om,
+ 
+     rsp = (struct ble_sm_pair_cmd *)(*om)->om_data;
+ 
++    // BLESPlo.it patch: expose raw pairing response via callback if registered
++    // Invoke callback if registered - do this before validation
++    // so app can see response even if it will be rejected
++    if (ble_sm_pairing_rsp_cb != NULL) {
++        // cast to public ble_sm_pairing_params which is 1:1 with private ble_sm_pair_cmd
++        ble_sm_pairing_rsp_cb(conn_handle, (struct ble_sm_pairing_params *)rsp, ble_sm_pairing_rsp_cb_arg);
++    }
++    // ===== END OF PATCH =====
++
+     ble_hs_lock();
+     proc = ble_sm_proc_find(conn_handle, BLE_SM_PROC_STATE_PAIR, 1, NULL);
+     if (proc != NULL) {

@@ -1,0 +1,132 @@
+/* ── Layout ── */
+
+
+/* force override common.css gradient background */
+body.scan-page {
+    background: var(--color-surface-wash) !important;
+    margin: 0 auto;
+    padding: 15px;
+    min-height: unset;
+    overflow-x: hidden;
+}
+
+.card {
+    width: 100%;
+    box-sizing: border-box;
+}
+.controls { margin-bottom: 15px; }
+
+.button-group {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+}
+.button-group button { flex: 1; min-width: 100px; }
+
+/* ── Device list ── */
+.device-list h2 { font-size: 18px; margin: 0 0 15px 0; }
+.device { border-bottom: 1px solid #eee; padding: 12px 0; }
+.device:last-child { border-bottom: none; }
+
+.device-header {
+    display: grid;
+    grid-template-columns: 60px 1fr;
+    grid-template-rows: auto auto;
+    gap: 12px;
+    align-items: start;
+}
+.device-rssi    { text-align: center; padding: 8px 0; grid-column: 1; grid-row: 1; }
+.device-content { min-width: 0; grid-column: 2; grid-row: 1; }
+.device-actions { grid-column: 2; grid-row: 2; display: flex; gap: 8px; flex-wrap: wrap; }
+.device-actions button { flex: 1; min-width: 0; max-width: 100%, padding: 10px 14px; font-size: 13px; }
+
+/* ── RSSI ── */
+.rssi-excellent { color: #28a745; }
+.rssi-good      { color: #5cb85c; }
+.rssi-fair      { color: #f0ad4e; }
+.rssi-poor      { color: #d9534f; }
+.rssi-value     { font-size: 20px; font-weight: bold; line-height: 1; }
+.rssi-label     { font-size: 10px; color: #666; margin-top: 2px; }
+
+/* ── Device info ── */
+.device-name    { font-weight: 600; font-size: 15px; color: #333; margin-bottom: 4px; word-wrap: break-word; }
+.device-addr    { color: #666; font-family: monospace; font-size: 12px; margin-bottom: 6px; word-break: break-all; }
+.device-meta    { color: #888; font-size: 12px; margin-bottom: 4px; }
+.device-details { font-size: 11px; color: #999; margin-bottom: 10px; }
+
+/* ── ADV data ── */
+.adv-data-section {
+    display: none;
+    margin-top: 12px;
+    padding: 12px;
+    background: #f8f9fa;
+    border-radius: 6px;
+    border-left: 4px solid var(--color-brand);
+}
+.adv-data-section.expanded { display: block; }
+.adv-data-title  { font-weight: 600; color: #333; margin-bottom: 10px; font-size: 13px; }
+.adv-field       { margin-bottom: 8px; padding: 10px; background: white; border-radius: 4px; font-size: 12px; }
+.adv-field-type  { font-weight: 600; color: var(--color-brand); margin-bottom: 4px; font-size: 12px; }
+.adv-field-value { color: #333; word-break: break-all; margin-bottom: 4px; }
+.adv-field-hex   { color: #6c757d; font-family: monospace; font-size: 10px; word-break: break-all; }
+.raw-data {
+    margin-top: 10px;
+    padding: 10px;
+    background: #e9ecef;
+    border-radius: 4px;
+    font-family: monospace;
+    font-size: 10px;
+    color: #495057;
+    word-break: break-all;
+    cursor: pointer;
+    touch-action: manipulation;
+}
+.raw-data:active { background: #dee2e6; }
+@media (hover: hover) { .raw-data:hover { background: #dee2e6; } }
+
+.status-row {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 8px;
+}
+
+.status-row .status {
+    margin-bottom: 0; 
+}
+
+/* ── Desktop ── */
+@media (min-width: 768px) {
+    .button-group { flex-wrap: nowrap; }
+    .button-group button { flex: 0 0 auto; min-width: 120px; }
+
+    .device-header {
+        grid-template-columns: 80px 1fr auto;
+        grid-template-rows: 1fr;
+        gap: 20px;
+        align-items: center;
+    }
+    .device-rssi    { grid-column: 1; grid-row: 1; padding: 0; }
+    .device-content { grid-column: 2; grid-row: 1; }
+    .device-actions { grid-column: 3; grid-row: 1; flex-wrap: nowrap; min-width: 240px; }
+    .device-actions button { flex: 0 0 auto; min-width: 110px; }
+
+    .rssi-value  { font-size: 22px; }
+    .device-name { font-size: 16px; }
+    .device-addr { font-size: 14px; }
+    .device-meta { font-size: 13px; }
+    .device-details { font-size: 12px; margin-bottom: 0; }
+    .adv-data-section { padding: 15px; }
+    .adv-data-title   { font-size: 14px; }
+    .adv-field        { font-size: 13px; }
+    .raw-data         { font-size: 11px; }
+    .status-row {
+        flex-direction: row;
+        align-items: center;
+    }
+
+    .status-row .status {
+        flex: 1;
+    }
+}

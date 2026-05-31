@@ -1,0 +1,1230 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>BLE Device Editor</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; background: #F2F8FC; }
+    .service { background: white; margin: 10px 0; padding: 15px; border-radius: 5px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+    .service-header { font-size: 18px; font-weight: bold; color: #006EAB; margin-bottom: 10px; }
+    .clickable-header { cursor: pointer; user-select: none; }
+    .section { background: white; margin: 10px 0; padding: 15px; border-radius: 5px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+    .section-header { font-size: 18px; font-weight: bold; color: #4CAF50; margin-bottom: 10px; cursor: pointer; user-select: none; }
+    .pairing-section { background: white; margin: 10px 0; padding: 15px; border-radius: 5px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+    .pairing-header { font-size: 18px; font-weight: bold; color: #9C27B0; margin-bottom: 10px; cursor: pointer; user-select: none; }
+    .pairing-field { margin: 10px 0; padding: 10px; background: #f9f9f9; border-left: 3px solid #9C27B0; }
+    .readonly-field { margin: 10px 0; padding: 10px; background: #e0e0e0; border-left: 3px solid #757575; }
+    .flag-checkbox { margin: 5px 0; margin-left: 15px; }
+    .flag-checkbox input { margin-right: 8px; cursor: pointer; }
+    .flag-checkbox label { cursor: pointer; user-select: none; }
+    .main-checkbox { margin: 10px 0; padding: 10px; background: #f9f9f9; border-left: 3px solid #9C27B0; }
+    .main-checkbox input { margin-right: 8px; cursor: pointer; transform: scale(1.2); }
+    .main-checkbox label { cursor: pointer; user-select: none; font-weight: bold; }
+    .io-capability-select { padding: 5px 10px; margin-left: 10px; border-radius: 3px; border: 1px solid #ccc; background: white; cursor: pointer; }
+    .response-preset-buttons { margin: 10px 0; display: flex; gap: 5px; }
+    .preset-button { padding: 6px 12px; background: #673AB7; color: white; border: none; border-radius: 3px; cursor: pointer; font-size: 12px; }
+    .preset-button:hover { background: #5E35B1; }
+    .label { font-weight: bold; color: #555; }
+    .value { color: #333; font-family: monospace; }
+    button { padding: 4px 12px; margin-left: 8px; background: #006EAB; color: white; border: none; border-radius: 3px; cursor: pointer; }
+    button:hover { background: #005a8f; }
+    .characteristic { background: #f9f9f9; margin: 8px 0; padding: 10px; border-left: 3px solid #4CAF50; }
+    .properties { display: inline-block; background: #e8f4fb; padding: 2px 6px; border-radius: 3px; margin: 2px; font-size: 12px; }
+    .descriptor { background: #fff3e0; margin: 5px 0 5px 20px; padding: 8px; border-left: 2px solid #ff9800; }
+    .error { color: #d32f2f; padding: 10px; background: #ffebee; border-radius: 3px; margin: 10px 0; }
+    .ble-service { background: #f9f9f9; margin: 10px 0; padding: 12px; border-radius: 4px; border-left: 3px solid #4CAF50; }
+    .ble-service-header { font-size: 16px; font-weight: bold; color: #388E3C; cursor: pointer; user-select: none; }
+    .subsection-header { font-size: 14px; font-weight: bold; color: #9C27B0; margin: 15px 0 10px 0; padding-bottom: 5px; border-bottom: 2px solid #E1BEE7; }
+    .security-section { margin-top: 8px; padding: 8px; background: #FFF3E0; border-left: 3px solid #FF9800; border-radius: 4px; }
+    .security-checkbox { margin: 5px 0; }
+    .security-checkbox input { margin-right: 8px; cursor: pointer; }
+    .security-checkbox label { cursor: pointer; font-weight: bold; color: #E65100; }
+    .error-info { background: #FFEBEE; padding: 6px; margin-top: 5px; border-radius: 3px; font-size: 12px; }
+
+    .adv-section { background: white; margin: 10px 0; padding: 15px; border-radius: 5px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+    .adv-header { font-size: 18px; font-weight: bold; color: #E65100; margin-bottom: 10px; cursor: pointer; user-select: none; }
+    .adv-profile { background: #fff8e1; margin: 10px 0; padding: 12px; border-radius: 4px; border-left: 3px solid #FF9800; }
+    .adv-profile-header { font-size: 15px; font-weight: bold; color: #E65100; display: flex; justify-content: space-between; align-items: center; }
+    .adv-profile-content { margin-top: 10px; }
+    .adv-field-row { display: grid; grid-template-columns: 160px 1fr auto; gap: 8px; align-items: center; margin: 6px 0; }
+    .adv-field-row .label { font-size: 13px; }
+    .adv-field-row input[type=text], .adv-field-row select { font-family: monospace; font-size: 13px; padding: 3px 6px; border: 1px solid #ccc; border-radius: 3px; width: 100%; }
+    .adv-field-row input[type=number] { font-family: monospace; font-size: 13px; padding: 3px 6px; border: 1px solid #ccc; border-radius: 3px; width: 80px; }
+    .badge-enabled  { display:inline-block; padding:2px 8px; border-radius:10px; font-size:11px; background:#c8e6c9; color:#1b5e20; margin-left:8px; }
+    .badge-disabled { display:inline-block; padding:2px 8px; border-radius:10px; font-size:11px; background:#ffcdd2; color:#b71c1c; margin-left:8px; }
+    .hex-preview { font-size: 11px; color: #888; margin-top: 3px; font-family: monospace; word-break: break-all; }
+    .save-btn { background: #4CAF50; margin-left: 0; margin-top: 8px; }
+    .save-btn:hover { background: #388E3C; }
+    .add-profile-btn { background: #FF9800; margin: 8px 0 0; }
+    .add-profile-btn:hover { background: #F57C00; }
+    .del-profile-btn { background: #f44336; }
+    .del-profile-btn:hover { background: #d32f2f; }
+    .no-adv-msg { color: #888; font-style: italic; padding: 8px 0; }
+    .toggle-enabled-btn { font-size: 12px; padding: 2px 8px; margin-left: 6px; }
+    .rotation-section { margin-top: 10px; padding: 8px; background: #fff3e0; border-radius: 4px; border-left: 2px solid #FF9800; }
+    .rotation-payload { display: flex; gap: 8px; align-items: center; margin: 4px 0; }
+    .rotation-payload input { flex: 1; font-family: monospace; font-size: 12px; padding: 2px 4px; border: 1px solid #ccc; border-radius: 3px; }
+    .rotation-payload button { padding: 2px 8px; font-size: 12px; }
+  </style>
+
+</head>
+<body>
+    <h1>BLE Device Editor</h1>
+
+    <div id="device-info">Loading device info...</div>
+    <div id="advertising-data">Loading advertising data...</div>
+    <div id="pairing-info">Loading pairing info...</div>
+    <div id="services-section">Loading services...</div>
+
+    <script>
+        const pathParts = window.location.pathname.split('/');
+        const deviceId = pathParts[2] || 'none';
+
+        console.log('Device ID:', deviceId);
+
+        window.deviceInfo = null;
+        window.bleData = null;
+        window.advData    = null;   // peripheral/adv.json content
+
+        const propNames = {
+            1: "Broadcast", 2: "Read", 4: "WriteNoResp", 8: "Write",
+            16: "Notify", 32: "Indicate", 64: "AuthSignedWrite", 128: "ExtProps"
+        };
+
+        const uuidNames = {
+            "1800": "Generic Access", "1801": "Generic Attribute",
+            "180A": "Device information", "180F": "Battery Service",
+            "2A00": "Device Name", "2A01": "Appearance",
+            "2A05": "Service Changed", "2A19": "Battery Level", "2902": "CCCD"
+        };
+
+        const ioCapabilityNames = {
+            0: "DisplayOnly", 1: "DisplayYesNo", 2: "KeyboardOnly",
+            3: "NoInputNoOutput", 4: "KeyboardDisplay"
+        };
+
+        const DEFAULT_RESPONSE = {
+            io_capability: 3,
+            oob_data_flag: 0,
+            auth_req: 1,
+            max_key_size: 16,
+            init_key_dist: 1,
+            resp_key_dist: 1
+        };
+
+        function getUuidName(uuid) {
+            return uuidNames[uuid.toUpperCase()] || uuid;
+        }
+
+        function getProperties(props) {
+            let result = [];
+            for (let bit in propNames) {
+                if (props & bit) result.push(propNames[bit]);
+            }
+            return result;
+        }
+
+        function hexToAscii(hex) {
+            if (!hex) return '';
+            let str = '';
+            for (let i = 0; i < hex.length; i += 2) {
+                let code = parseInt(hex.substr(i, 2), 16);
+                str += (code >= 32 && code <= 126) ? String.fromCharCode(code) : '.';
+            }
+            return str;
+        }
+
+        function decodeAuthReq(authReq) {
+            return {
+                bonding: (authReq & 0x01) !== 0,
+                mitm: (authReq & 0x04) !== 0,
+                secure_connections: (authReq & 0x08) !== 0,
+                keypress: (authReq & 0x10) !== 0
+            };
+        }
+
+        function encodeAuthReq(flags) {
+            let authReq = 0;
+            if (flags.bonding) authReq |= 0x01;
+            if (flags.mitm) authReq |= 0x04;
+            if (flags.secure_connections) authReq |= 0x08;
+            if (flags.keypress) authReq |= 0x10;
+            return authReq;
+        }
+
+        // ========================================================================
+        // LOAD DATA
+        // ========================================================================
+
+        fetch(`/api/device/${deviceId}/info`)
+            .then(r => {
+                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                return r.json();
+            })
+            .then(info => {
+                console.log('Loaded device info:', info);
+                window.deviceInfo = info;
+                displayDeviceInfo(info);
+            })
+            .catch(err => {
+                console.error('Error loading device info:', err);
+                document.getElementById('device-info').innerHTML = 
+                    `<div class="error">Error: ${err.message}</div>`;
+            });
+
+        fetch(`/api/device/${deviceId}/ble`)
+            .then(r => {
+                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                return r.json();
+            })
+            .then(data => {
+                console.log('Loaded BLE data:', data);
+                window.bleData = data;
+
+                try { displayAdvertisingData(data.devinfo); }
+                catch (e) { document.getElementById('advertising-data').innerHTML = `<div class="error">Error: ${e.message}</div>`; }
+
+                try { displayPairingInfo(data.pairing_info); }
+                catch (e) { document.getElementById('pairing-info').innerHTML = `<div class="error">Error: ${e.message}</div>`; }
+
+                try { displayServices(data.services); }
+                catch (e) { document.getElementById('services-section').innerHTML = `<div class="error">Error: ${e.message}</div>`; }
+            })
+            .catch(err => {
+                console.error('Error loading BLE data:', err);
+                const errorMsg = `<div class="error">Error: ${err.message}</div>`;
+                document.getElementById('advertising-data').innerHTML = errorMsg;
+                document.getElementById('pairing-info').innerHTML = errorMsg;
+                document.getElementById('services-section').innerHTML = errorMsg;
+            });
+
+        fetch(`/api/device/${deviceId}/adv`)
+          .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+          .then(data => { window.advData = data; displayAdvData(data); })
+          .catch(err => {
+            document.getElementById('advertising-data').innerHTML =
+              `<div class="adv-section"><div class="adv-header">Advertising Profiles</div>` +
+              `<div class="error">Could not load peripheral/adv.json: ${err.message}</div></div>`;
+          });
+
+
+        // ========================================================================
+        // DISPLAY DEVICE INFO
+        // ========================================================================
+
+        function displayDeviceInfo(info) {
+            let html = '<div class="service"><div class="service-header">Device Information</div>';
+            html += `<div><span class="label">Device ID:</span> <span class="value" id="info-deviceid">${deviceId}</span>`;
+            html += ' <button onclick="editDeviceId()">Edit</button></div>';
+
+            const name = info.name || '';
+            html += `<div><span class="label">Name:</span> <span class="value" id="info-name">${name || 'N/A'}</span>`;
+            html += ` <button onclick="editInfoField('name', '${name.replace(/'/g, "\'")}')">Edit</button></div>`;
+
+            const description = info.description || '';
+            html += `<div><span class="label">Description:</span> <span class="value" id="info-description">${description || 'N/A'}</span>`;
+            html += ` <button onclick="editInfoField('description', '${description.replace(/'/g, "\'")}')">Edit</button></div>`;
+
+            const author = info.author || '';
+            html += `<div><span class="label">Author:</span> <span class="value" id="info-author">${author || 'N/A'}</span>`;
+            html += ` <button onclick="editInfoField('author', '${author.replace(/'/g, "\'")}')">Edit</button></div>`;
+
+            const link = info.link || '';
+            html += `<div><span class="label">Link:</span> <span class="value" id="info-link">${link || 'N/A'}</span>`;
+            html += ` <button onclick="editInfoField('link', '${link.replace(/'/g, "\'")}')">Edit</button></div>`;
+
+            html += '</div>';
+            document.getElementById('device-info').innerHTML = html;
+        }
+
+        function editInfoField(fieldName, currentValue) {
+            const newValue = prompt(`Edit ${fieldName}:`, currentValue);
+            if (newValue !== null && newValue !== currentValue) {
+                const updateData = {};
+                updateData[fieldName] = newValue;
+                fetch(`/api/device/${deviceId}/info`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(updateData)
+                })
+                .then(r => { if (!r.ok) throw new Error('Update failed'); return r.json(); })
+                .then(() => {
+                    document.getElementById(`info-${fieldName}`).textContent = newValue || 'N/A';
+                    if (window.deviceInfo) window.deviceInfo[fieldName] = newValue;
+                    alert(`${fieldName} updated!`);
+                })
+                .catch(err => alert(`Error: ` + err));
+            }
+        }
+
+        function editDeviceId() {
+            const currentId = deviceId;
+            const newId = prompt('Edit Device ID:', currentId);
+            if (newId !== null && newId !== currentId && newId.trim()) {
+                fetch(`/api/device/${currentId}/info`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ deviceid: newId })
+                })
+                .then(r => { if (!r.ok) throw new Error('Update failed'); return r.json(); })
+                .then(() => {
+                    alert('Device ID updated! Redirecting...');
+                    window.location.href = `/device/${newId}`;
+                })
+                .catch(err => alert('Error: ' + err));
+            }
+        }
+
+        // ========================================================================
+        // DISPLAY ADVERTISING DATA
+        // ========================================================================
+
+/* ═══════════════════════════════ ADV DATA (peripheral/adv.json) ══════════ */
+function displayAdvData(advJson) {
+    const profiles = advJson && Array.isArray(advJson.profiles) ? advJson.profiles : null;
+    let html = `<div class="adv-section">`;
+    html += `<div class="adv-header" onclick="toggleAdvSection()"><span id="adv-header-arrow">▶</span> Advertising Profiles</div>`;
+    html += `<div id="adv-content" style="display:none">`;
+    if (!profiles || profiles.length === 0) {
+        html += `<div class="no-adv-msg">No advertising profiles defined in peripheral_adv.json.</div>`;
+    } else {
+        profiles.forEach((p, idx) => { html += renderAdvProfile(p, idx); });
+    }
+    html += `<button class="add-profile-btn" onclick="addAdvProfile()">&#43; Add Profile</button>`;
+    html += `</div></div>`;
+    document.getElementById('advertising-data').innerHTML = html;
+}
+function toggleAdvSection() {
+    const content = document.getElementById('adv-content');
+    const arrow = document.getElementById('adv-header-arrow');
+    if (!content) return;
+    const opening = content.style.display === 'none';
+    content.style.display = opening ? 'block' : 'none';
+    if (arrow) arrow.textContent = opening ? '▼' : '▶';
+}
+
+function renderAdvProfile(p, idx) {
+    const enabled = p.enabled !== false;
+    const badgeCls = enabled ? 'badge-enabled' : 'badge-disabled';
+    const badgeTxt = enabled ? 'enabled' : 'disabled';
+    const pid = p.id || `profile${idx}`;
+    let html = `<div class="adv-profile">`;
+    html += `<div class="adv-profile-header">`;
+    html += `<span>Profile <b>${pid}</b><span class="${badgeCls}">${badgeTxt}</span></span>`;
+    html += `<span>`;
+    html += `<button class="toggle-enabled-btn" onclick="toggleAdvProfileEnabled(${idx})">${enabled ? 'Disable' : 'Enable'}</button>`;
+    html += `<button class="del-profile-btn" onclick="deleteAdvProfile(${idx})">Delete</button>`;
+    html += `</span></div>`;
+    html += `<div class="adv-profile-content">`;
+
+
+  const fields = [
+    {key:'id',          label:'Profile ID',         type:'text'},
+    {key:'bd_addr',      label:'BD Address',          type:'text', placeholder:'AA:BB:CC:DD:EE:FF'},
+    {key:'addr_type',    label:'Address Type',        type:'select', options:['random_specific','random_generated','public','public_hardware']},
+    {key:'adv_data_hex',  label:'Adv Data (hex)',       type:'text', mono:true},
+    {key:'scan_rsp_hex',  label:'Scan Response (hex)',  type:'text', mono:true},
+    {key:'adv_interval_ms',label:'Adv Interval (ms)',   type:'number'},
+    {key:'tx_power',     label:'TX Power',             type:'number'},
+    {key:'primary_phy',  label:'Primary PHY',          type:'select', options:['1M','2M','coded']},
+    {key:'secondary_phy',label:'Secondary PHY',        type:'select', options:['1M','2M','coded']},
+  ];
+
+  fields.forEach(f => {
+    const val = p[f.key] !== undefined ? p[f.key] : '';
+    html += `<div class="adv-field-row">`;
+    html += `<span class="label">${f.label}</span>`;
+    if (f.type === 'select') {
+      html += `<select id="adv-${idx}-${f.key}" onchange="advFieldChanged(${idx})">`;
+      f.options.forEach(o => html += `<option value="${o}"${val===o?' selected':''}>${o}</option>`);
+      html += `</select>`;
+    } else {
+      const mono = f.mono ? ' style="font-family:monospace"' : '';
+      html += `<input type="${f.type}" id="adv-${idx}-${f.key}" value="${escHtml(String(val))}" placeholder="${f.placeholder||''}"${mono} oninput="advFieldChanged(${idx})">`;
+    }
+    html += `<span></span></div>`;
+    if (f.key === 'advdatahex' && val) {
+      html += `<div class="hex-preview">ASCII: ${escHtml(hexToAscii(String(val)))}</div>`;
+    }
+  });
+
+  /* Boolean flags */
+  ['legacy_pdu','connectable','scannable'].forEach(flag => {
+    const checked = p[flag] ? 'checked' : '';
+    html += `<div style="margin:5px 0"><label><input type="checkbox" id="adv-${idx}-${flag}" ${checked} onchange="advFieldChanged(${idx})"> ${flag}</label></div>`;
+  });
+
+  /* Rotation block summary */
+  if (p.rotation && Array.isArray(p.rotation.payloads) && p.rotation.payloads.length > 0) {
+    html += `<div class="rotation-section"><b>Rotation</b> (interval ${p.rotation.intervalms||1000} ms)<br>`;
+    p.rotation.payloads.forEach((pl, ri) => {
+      html += `<div class="rotation-payload"><span style="font-size:11px;color:#888">#${ri}</span>`;
+      html += `<input type="text" id="adv-${idx}-rot-${ri}" value="${escHtml(pl.advdatahex||'')}" placeholder="advdatahex" oninput="advFieldChanged(${idx})">`;
+      html += `<button onclick="removeRotationPayload(${idx},${ri})">✕</button></div>`;
+    });
+    html += `<input type="number" id="adv-${idx}-rot-interval" value="${p.rotation.intervalms||1000}" style="width:80px" oninput="advFieldChanged(${idx})"> ms interval<br>`;
+    html += `<button style="font-size:11px;padding:2px 6px;margin-top:4px;background:#FF9800" onclick="addRotationPayload(${idx})">+ Payload</button>`;
+    html += `</div>`;
+  } else {
+    html += `<button style="font-size:11px;padding:2px 6px;margin-top:8px;background:#FF9800" onclick="addRotationBlock(${idx})">+ Add Rotation</button>`;
+  }
+
+  html += `<br><button class="save-btn" onclick="saveAdvProfile(${idx})">💾 Save Profile</button>`;
+  html += `</div></div>`;
+  return html;
+}
+
+function escHtml(t) {
+  const d = document.createElement('div'); d.textContent = t; return d.innerHTML;
+}
+
+function toggleSection(contentId, arrowId) {
+  const el = document.getElementById(contentId);
+  const ar = document.getElementById(arrowId);
+  if (!el) return;
+  const hidden = el.style.display === 'none';
+  el.style.display = hidden ? '' : 'none';
+  if (ar) ar.textContent = hidden ? '▼' : '▶';
+}
+
+/* Gather current form values for a profile and merge into window.advData */
+function gatherAdvProfile(idx) {
+  const keys = ['id','bd_addr','addr_type','adv_data_hex','scan_rsp_hex','adv_interval_ms','tx_power','primary_phy','secondary_phy'];
+  const bools = ['legacy_pdu','connectable','scannable'];
+  const p = window.advData.profiles[idx];
+
+  keys.forEach(k => {
+    const el = document.getElementById(`adv-${idx}-${k}`);
+    if (!el) return;
+    const v = el.value.trim();
+    if (k === 'advintervalms' || k === 'txpower') {
+      if (v !== '') p[k] = parseFloat(v);
+    } else {
+      if (v !== '') p[k] = v;
+    }
+  });
+  bools.forEach(b => {
+    const el = document.getElementById(`adv-${idx}-${b}`);
+    if (el) p[b] = el.checked;
+  });
+
+  /* Rotation */
+  if (p.rotation && Array.isArray(p.rotation.payloads)) {
+    const intEl = document.getElementById(`adv-${idx}-rot-interval`);
+    if (intEl) p.rotation.intervalms = parseFloat(intEl.value) || 1000;
+    p.rotation.payloads.forEach((pl, ri) => {
+      const el = document.getElementById(`adv-${idx}-rot-${ri}`);
+      if (el) pl.advdatahex = el.value.trim();
+    });
+  }
+}
+
+function advFieldChanged(idx) {
+  /* live gather — could be used for live preview; currently just marks dirty */
+}
+
+function saveAdvProfile(idx) {
+  gatherAdvProfile(idx);
+  saveAdvJson();
+}
+
+function saveAdvJson() {
+  fetch(`/api/device/${deviceId}/adv`, {
+    method: 'PATCH',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(window.advData)
+  })
+    .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+    .then(() => alert('Advertising profiles saved!'))
+    .catch(err => alert('Save failed: ' + err));
+}
+
+function toggleAdvProfileEnabled(idx) {
+  gatherAdvProfile(idx);
+  const p = window.advData.profiles[idx];
+  p.enabled = !p.enabled;
+  displayAdvData(window.advData);
+}
+
+function deleteAdvProfile(idx) {
+  if (!confirm('Delete this advertising profile?')) return;
+  window.advData.profiles.splice(idx, 1);
+  saveAdvJson();
+  displayAdvData(window.advData);
+}
+
+function addAdvProfile() {
+  if (!window.advData) window.advData = {profiles:[]};
+  if (!Array.isArray(window.advData.profiles)) window.advData.profiles = [];
+  window.advData.profiles.push({
+    id: `profile${window.advData.profiles.length}`,
+    enabled: true,
+    legacy_pdu: true,
+    connectable: false,
+    scannable: false,
+    addr_type: 'randoms_pecific',
+    bd_addr: '',
+    adv_data_hex: '',
+    scan_rsp_hex: '',
+    adv_interval_ms: 100,
+    tx_power: 127,
+    primary_phy: '1M',
+    secondary_phy: '1M'
+  });
+  displayAdvData(window.advData);
+}
+
+function addRotationBlock(idx) {
+  gatherAdvProfile(idx);
+  const p = window.advData.profiles[idx];
+  p.rotation = { intervalms: 1000, payloads: [{advdatahex:''},{advdatahex:''}] };
+  displayAdvData(window.advData);
+}
+
+function addRotationPayload(idx) {
+  gatherAdvProfile(idx);
+  const p = window.advData.profiles[idx];
+  if (!p.rotation) return;
+  p.rotation.payloads.push({advdatahex:''});
+  displayAdvData(window.advData);
+}
+
+function removeRotationPayload(idx, ri) {
+  gatherAdvProfile(idx);
+  const p = window.advData.profiles[idx];
+  if (!p.rotation) return;
+  p.rotation.payloads.splice(ri, 1);
+  if (p.rotation.payloads.length < 1) delete p.rotation;
+  displayAdvData(window.advData);
+}
+
+        // ========================================================================
+        // DISPLAY PAIRING INFO
+        // ========================================================================
+
+        function displayPairingInfo(pairingInfo) {
+            console.log('Displaying pairing_info:', pairingInfo);
+            let html = '<div class="pairing-section">';
+            html += '<div class="pairing-header" onclick="togglePairing()">⯈ Pairing Information</div>';
+            html += '<div id="pairing-content" style="display: none;">';
+
+            // Check if we have response_original OR response
+            if (pairingInfo && (pairingInfo.response_original || pairingInfo.response)) {
+                // Initiate pairing checkbox
+                html += '<div class="main-checkbox">';
+                const initiatePairing = pairingInfo.initiate_pairing_on_connection || false;
+                html += `<input type="checkbox" id="initiate-pairing-checkbox" ${initiatePairing ? 'checked' : ''} onchange="updateInitiatePairing()">`;
+                html += '<label for="initiate-pairing-checkbox">Initiate pairing on connection</label>';
+                html += '</div>';
+
+                // Passkey
+                html += '<div class="pairing-field">';
+                html += '<span class="label">Passkey:</span> ';
+                html += `<span class="value" id="pairing-passkey">${pairingInfo.passkey || '(not set)'}</span>`;
+                html += ' <button onclick="editPasskey()">Edit</button>';
+                html += '</div>';
+
+                // Original Response (read-only) - always show if present
+                if (pairingInfo.response_original) {
+                    html += '<div class="subsection-header">Original Response (Read-Only)</div>';
+                    html += displayResponseFields(pairingInfo.response_original, 'original', true);
+                }
+
+                // Current Response (editable) - only if present
+                if (pairingInfo.response) {
+                    html += '<div class="subsection-header">Current Response (Editable)</div>';
+                    html += '<div class="response-preset-buttons">';
+                    html += '<button class="preset-button" onclick="setResponsePreset(&quot;use_default&quot;)">Use Default</button>';
+                    if (pairingInfo.response_original) {
+                        html += '<button class="preset-button" onclick="setResponsePreset(&quot;copy_original&quot;)">Copy Original</button>';
+                    }
+                    html += '</div>';
+                    html += displayResponseFields(pairingInfo.response, 'current', false);
+                } else if (pairingInfo.response_original) {
+                    // Only have original, offer to create response
+                    html += '<div class="subsection-header">Current Response</div>';
+                    html += '<div style="padding: 10px;">No custom response configured</div>';
+                    html += '<div class="response-preset-buttons">';
+                    html += '<button class="preset-button" onclick="createResponseFromOriginal()">Copy from Original</button>';
+                    html += '<button class="preset-button" onclick="createResponseDefault()">Use Default</button>';
+                    html += '</div>';
+                }
+
+            } else {
+                html += '<div style="padding: 10px;">No pairing information configured</div>';
+                html += '<button onclick="createPairingInfo()">Create Pairing Information</button>';
+            }
+
+            html += '</div></div>';
+            document.getElementById('pairing-info').innerHTML = html;
+        }
+
+        function displayResponseFields(resp, prefix, readOnly) {
+            let html = '';
+            const fieldClass = readOnly ? 'readonly-field' : 'pairing-field';
+
+            // IO Capability
+            html += `<div class="${fieldClass}">`;
+            html += '<span class="label">IO Capability:</span> ';
+            const ioCapName = ioCapabilityNames[resp.io_capability] || 'Unknown';
+            html += `<span class="value" id="io-cap-display-${prefix}">${ioCapName} (${resp.io_capability})</span>`;
+            if (!readOnly) {
+                html += `<select class="io-capability-select" id="io-cap-select-${prefix}" onchange="updateIoCapability()">`;
+                for (let key in ioCapabilityNames) {
+                    const selected = (key == resp.io_capability) ? 'selected' : '';
+                    html += `<option value="${key}" ${selected}>${ioCapabilityNames[key]}</option>`;
+                }
+                html += '</select>';
+            }
+            html += '</div>';
+
+            // Auth Req
+            html += `<div class="${fieldClass}">`;
+            html += '<span class="label">Authentication Requirements:</span> ';
+            html += `<span class="value">(raw: <span id="auth-req-raw-${prefix}">${resp.auth_req}</span>)</span>`;
+
+            if (!readOnly) {
+                // Existing editable checkboxes code stays the same
+                const flags = decodeAuthReq(resp.auth_req);
+                html += '<div class="flag-checkbox">';
+                html += `<input type="checkbox" id="flag-bonding-${prefix}" ${flags.bonding ? 'checked' : ''} onchange="updateAuthReq()">`;
+                html += `<label for="flag-bonding-${prefix}">Bonding</label></div>`;
+                html += '<div class="flag-checkbox">';
+                html += `<input type="checkbox" id="flag-mitm-${prefix}" ${flags.mitm ? 'checked' : ''} onchange="updateAuthReq()">`;
+                html += `<label for="flag-mitm-${prefix}">MITM Protection</label></div>`;
+                html += '<div class="flag-checkbox">';
+                html += `<input type="checkbox" id="flag-sc-${prefix}" ${flags.secure_connections ? 'checked' : ''} onchange="updateAuthReq()">`;
+                html += `<label for="flag-sc-${prefix}">Secure Connections</label></div>`;
+                html += '<div class="flag-checkbox">';
+                html += `<input type="checkbox" id="flag-keypress-${prefix}" ${flags.keypress ? 'checked' : ''} onchange="updateAuthReq()">`;
+                html += `<label for="flag-keypress-${prefix}">Keypress Notifications</label></div>`;
+            } else {
+                // For read-only (original response), show enabled flags as text
+                const flags = decodeAuthReq(resp.auth_req);
+                const enabledFlags = [];
+                if (flags.bonding) enabledFlags.push('Bonding');
+                if (flags.mitm) enabledFlags.push('MITM Protection');
+                if (flags.secure_connections) enabledFlags.push('Secure Connections');
+                if (flags.keypress) enabledFlags.push('Keypress Notifications');
+
+                if (enabledFlags.length > 0) {
+                    html += '<div style="margin-top: 5px; margin-left: 10px;">';
+                    enabledFlags.forEach(flag => {
+                        html += `<div style="color: #388E3C; font-weight: bold;">✓ ${flag}</div>`;
+                    });
+                    html += '</div>';
+                } else {
+                    html += '<div style="margin-top: 5px; margin-left: 10px; color: #757575;">No requirements</div>';
+                }
+            }
+            html += '</div>';
+
+            // Other fields
+            html += `<div class="${fieldClass}">`;
+            html += '<div style="display: grid; grid-template-columns: 220px 100px 80px; gap: 10px; align-items: center;">';
+
+            html += '<span class="label">OOB Data Flag:</span>';
+            html += `<span class="value" id="oob-flag-${prefix}">${resp.oob_data_flag}</span>`;
+            if (!readOnly) html += `<button onclick="editPairingField('oob_data_flag', ${resp.oob_data_flag})">Edit</button>`;
+            else html += '<span></span>';
+
+            html += '<span class="label">Max Key Size:</span>';
+            html += `<span class="value" id="max-key-size-${prefix}">${resp.max_key_size}</span>`;
+            if (!readOnly) html += `<button onclick="editPairingField('max_key_size', ${resp.max_key_size})">Edit</button>`;
+            else html += '<span></span>';
+
+            html += '<span class="label">Init Key Distribution:</span>';
+            html += `<span class="value" id="init-key-dist-${prefix}">${resp.init_key_dist}</span>`;
+            if (!readOnly) html += `<button onclick="editPairingField('init_key_dist', ${resp.init_key_dist})">Edit</button>`;
+            else html += '<span></span>';
+
+            html += '<span class="label">Resp Key Distribution:</span>';
+            html += `<span class="value" id="resp-key-dist-${prefix}">${resp.resp_key_dist}</span>`;
+            if (!readOnly) html += `<button onclick="editPairingField('resp_key_dist', ${resp.resp_key_dist})">Edit</button>`;
+            else html += '<span></span>';
+
+            html += '</div></div>';
+
+            return html;
+        }
+
+        function togglePairing() {
+            const content = document.getElementById('pairing-content');
+            const header = document.querySelector('.pairing-header');
+            if (content.style.display === 'none') {
+                content.style.display = 'block';
+                header.textContent = header.textContent.replace('⯈', '⯆');
+            } else {
+                content.style.display = 'none';
+                header.textContent = header.textContent.replace('⯆', '⯈');
+            }
+        }
+
+        function createPairingInfo() {
+            if (!confirm('Create pairing information with default values?')) return;
+
+            const defaultPairingInfo = {
+                pairing_info: {
+                    passkey: "000000",
+                    initiate_pairing_on_connection: false,
+                    response: { ...DEFAULT_RESPONSE }
+                }
+            };
+
+            fetch(`/api/device/${deviceId}/ble`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(defaultPairingInfo)
+            })
+            .then(r => { if (!r.ok) throw new Error('Create failed'); return r.json(); })
+            .then(() => {
+                if (window.bleData) window.bleData.pairing_info = defaultPairingInfo.pairing_info;
+                displayPairingInfo(defaultPairingInfo.pairing_info);
+                alert('Pairing information created!');
+            })
+            .catch(err => alert('Error: ' + err));
+        }
+
+        function createResponseFromOriginal() {
+            if (!window.bleData || !window.bleData.pairing_info || !window.bleData.pairing_info.response_original) {
+                alert('No original response available');
+                return;
+            }
+
+            if (!confirm('Create response by copying original?')) return;
+
+            const newResponse = { ...window.bleData.pairing_info.response_original };
+
+            fetch(`/api/device/${deviceId}/ble`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ pairing_info: { response: newResponse } })
+            })
+            .then(r => { if (!r.ok) throw new Error('Create failed'); return r.json(); })
+            .then(() => {
+                if (window.bleData && window.bleData.pairing_info) {
+                    window.bleData.pairing_info.response = newResponse;
+                }
+                displayPairingInfo(window.bleData.pairing_info);
+                alert('Response created from original!');
+            })
+            .catch(err => alert('Error: ' + err));
+        }
+
+        function createResponseDefault() {
+            if (!confirm('Create response with default values?')) return;
+
+            fetch(`/api/device/${deviceId}/ble`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ pairing_info: { response: { ...DEFAULT_RESPONSE } } })
+            })
+            .then(r => { if (!r.ok) throw new Error('Create failed'); return r.json(); })
+            .then(() => {
+                if (window.bleData && window.bleData.pairing_info) {
+                    window.bleData.pairing_info.response = { ...DEFAULT_RESPONSE };
+                }
+                displayPairingInfo(window.bleData.pairing_info);
+                alert('Response created with defaults!');
+            })
+            .catch(err => alert('Error: ' + err));
+        }
+
+        function updateInitiatePairing() {
+            const checked = document.getElementById('initiate-pairing-checkbox').checked;
+
+            fetch(`/api/device/${deviceId}/ble`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    pairing_info: {
+                        initiate_pairing_on_connection: checked
+                    }
+                })
+            })
+            .then(r => { if (!r.ok) throw new Error('Update failed'); return r.json(); })
+            .then(() => {
+                if (window.bleData && window.bleData.pairing_info) {
+                    window.bleData.pairing_info.initiate_pairing_on_connection = checked;
+                }
+                alert('Updated!');
+            })
+            .catch(err => {
+                alert('Error: ' + err);
+                document.getElementById('initiate-pairing-checkbox').checked = !checked;
+            });
+        }
+
+        function setResponsePreset(preset) {
+            let newResponse;
+
+            if (preset === 'use_default') {
+                newResponse = { ...DEFAULT_RESPONSE };
+            } else if (preset === 'copy_original') {
+                if (window.bleData && window.bleData.pairing_info && window.bleData.pairing_info.response_original) {
+                    newResponse = { ...window.bleData.pairing_info.response_original };
+                } else {
+                    alert('No original response available');
+                    return;
+                }
+            }
+
+            if (!confirm(`Set response to: ${preset.replace('_', ' ')}?`)) return;
+
+            fetch(`/api/device/${deviceId}/ble`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    pairing_info: {
+                        response: newResponse
+                    }
+                })
+            })
+            .then(r => { if (!r.ok) throw new Error('Update failed'); return r.json(); })
+            .then(() => {
+                if (window.bleData && window.bleData.pairing_info) {
+                    window.bleData.pairing_info.response = newResponse;
+                }
+                displayPairingInfo(window.bleData.pairing_info);
+                alert('Response updated!');
+            })
+            .catch(err => alert('Error: ' + err));
+        }
+
+        function editPasskey() {
+            const currentValue = document.getElementById('pairing-passkey').textContent;
+            const cleanValue = currentValue === '(not set)' ? '' : currentValue;
+            const newValue = prompt('Edit Passkey (6 digits):', cleanValue);
+
+            if (newValue !== null) {
+                fetch(`/api/device/${deviceId}/ble`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ pairing_info: { passkey: newValue.trim() } })
+                })
+                .then(r => { if (!r.ok) throw new Error('Update failed'); return r.json(); })
+                .then(() => {
+                    const displayValue = newValue.trim() || '(not set)';
+                    document.getElementById('pairing-passkey').textContent = displayValue;
+                    alert('Passkey updated!');
+                })
+                .catch(err => alert('Error: ' + err));
+            }
+        }
+
+        function updateIoCapability() {
+            const select = document.getElementById('io-cap-select-current');
+            const ioCap = parseInt(select.value);
+
+            fetch(`/api/device/${deviceId}/ble`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ pairing_info: { response: { io_capability: ioCap } } })
+            })
+            .then(r => { if (!r.ok) throw new Error('Update failed'); return r.json(); })
+            .then(() => {
+                const ioCapName = ioCapabilityNames[ioCap];
+                document.getElementById('io-cap-display-current').textContent = `${ioCapName} (${ioCap})`;
+                if (window.bleData && window.bleData.pairing_info && window.bleData.pairing_info.response) {
+                    window.bleData.pairing_info.response.io_capability = ioCap;
+                }
+                alert('IO Capability updated!');
+            })
+            .catch(err => {
+                alert('Error: ' + err);
+                if (window.bleData && window.bleData.pairing_info && window.bleData.pairing_info.response) {
+                    select.value = window.bleData.pairing_info.response.io_capability;
+                }
+            });
+        }
+
+        function updateAuthReq() {
+            const flags = {
+                bonding: document.getElementById('flag-bonding-current').checked,
+                mitm: document.getElementById('flag-mitm-current').checked,
+                secure_connections: document.getElementById('flag-sc-current').checked,
+                keypress: document.getElementById('flag-keypress-current').checked
+            };
+
+            const authReq = encodeAuthReq(flags);
+
+            fetch(`/api/device/${deviceId}/ble`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ pairing_info: { response: { auth_req: authReq } } })
+            })
+            .then(r => { if (!r.ok) throw new Error('Update failed'); return r.json(); })
+            .then(() => {
+                document.getElementById('auth-req-raw-current').textContent = authReq;
+                if (window.bleData && window.bleData.pairing_info && window.bleData.pairing_info.response) {
+                    window.bleData.pairing_info.response.auth_req = authReq;
+                }
+                alert('Auth requirements updated!');
+            })
+            .catch(err => alert('Error: ' + err));
+        }
+
+        function editPairingField(fieldName, currentValue) {
+            const friendlyNames = {
+                'oob_data_flag': 'OOB Data Flag (0 or 1)',
+                'max_key_size': 'Max Key Size (7-16)',
+                'init_key_dist': 'Init Key Distribution',
+                'resp_key_dist': 'Resp Key Distribution'
+            };
+
+            const newValue = prompt(`Edit ${friendlyNames[fieldName]}:`, currentValue);
+
+            if (newValue !== null) {
+                const numValue = parseInt(newValue);
+
+                if (isNaN(numValue)) {
+                    alert('Please enter a valid number');
+                    return;
+                }
+                if (fieldName === 'max_key_size' && (numValue < 7 || numValue > 16)) {
+                    alert('Max key size must be 7-16');
+                    return;
+                }
+
+                const updateData = { pairing_info: { response: {} } };
+                updateData.pairing_info.response[fieldName] = numValue;
+
+                fetch(`/api/device/${deviceId}/ble`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(updateData)
+                })
+                .then(r => { if (!r.ok) throw new Error('Update failed'); return r.json(); })
+                .then(() => {
+                    const elementId = fieldName.replace(/_/g, '-');
+                    document.getElementById(`${elementId}-current`).textContent = numValue;
+                    if (window.bleData && window.bleData.pairing_info && window.bleData.pairing_info.response) {
+                        window.bleData.pairing_info.response[fieldName] = numValue;
+                    }
+                    alert('Updated!');
+                })
+                .catch(err => alert('Error: ' + err));
+            }
+        }
+
+        // ========================================================================
+        // DISPLAY SERVICES WITH SECURITY OPTIONS
+        // ========================================================================
+
+        function displayServices(services) {
+            console.log('Displaying services:', services);
+
+            let html = '<div class="section">';
+            html += '<div class="section-header" onclick="toggleServicesSection()">⯈ Services</div>';
+            html += '<div id="services-content" style="display: none;">';
+
+            if (!services || services.length === 0) {
+                html += '<div style="padding: 10px;">No services defined</div>';
+            } else {
+                services.forEach((svc, svcIdx) => {
+                    html += '<div class="ble-service">';
+                    html += `<div class="ble-service-header" onclick="toggleService(${svcIdx})">`;
+                    html += `<span id="toggle-${svcIdx}">⯈</span> ${getUuidName(svc.uuid)} (${svc.uuid})`;
+                    html += '</div>';
+                    html += `<div id="service-${svcIdx}" style="display: none;">`;
+                    html += `<div style="margin-top: 8px;"><span class="label">Type:</span> <span class="value">${svc.type || 'primary'}</span></div>`;
+                    html += `<div><span class="label">Handles:</span> <span class="value">${svc.start_handle} - ${svc.end_handle}</span></div>`;
+
+                    if (svc.characteristics && svc.characteristics.length > 0) {
+                        svc.characteristics.forEach((chr, chrIdx) => {
+                            html += '<div class="characteristic">';
+                            html += `<div><span class="label">${getUuidName(chr.value.uuid)}</span> <span class="value">${chr.value.uuid}</span></div>`;
+                            html += `<div><span class="label">Handle:</span> <span class="value">${chr.handle}</span> `;
+                            html += `<span class="label">Value Handle:</span> <span class="value">${chr.value.handle}</span></div>`;
+
+                            html += '<div><span class="label">Properties:</span> ';
+                            const propsList = getProperties(chr.properties);
+                            html += `<span id="props-${svcIdx}-${chrIdx}">`;
+                            propsList.forEach(p => {
+                                html += `<span class="properties">${p}</span>`;
+                            });
+                            html += '</span>';
+                            html += ` <button onclick="editProperties(${svcIdx}, ${chrIdx}, ${chr.properties})">Edit</button>`;
+                            html += '</div>';
+
+                            // SECURITY SECTION
+                            const encryptionReq = chr.value.encryption_required || false;
+                            const authReq = chr.value.authentication_required || false;
+
+                            html += '<div class="security-section">';
+                            html += '<div style="font-weight: bold; margin-bottom: 5px;">Security Requirements:</div>';
+
+                            html += '<div class="security-checkbox">';
+                            html += `<input type="checkbox" id="enc-${svcIdx}-${chrIdx}" ${encryptionReq ? 'checked' : ''} onchange="updateSecurity(${svcIdx}, ${chrIdx}, 'encryption')">`;
+                            html += `<label for="enc-${svcIdx}-${chrIdx}">Encryption Required</label>`;
+                            html += '</div>';
+
+                            html += '<div class="security-checkbox">';
+                            html += `<input type="checkbox" id="auth-${svcIdx}-${chrIdx}" ${authReq ? 'checked' : ''} onchange="updateSecurity(${svcIdx}, ${chrIdx}, 'authentication')">`;
+                            html += `<label for="auth-${svcIdx}-${chrIdx}">Authentication Required</label>`;
+                            html += '</div>';
+
+                            // Display read_error and error_code if present
+                            if (chr.value.read_error || chr.value.error_code !== undefined) {
+                                html += '<div class="error-info">';
+                                if (chr.value.read_error) {
+                                    html += `<div><span class="label">Read Error:</span> <span class="value">${chr.value.read_error}</span></div>`;
+                                }
+                                if (chr.value.error_code !== undefined) {
+                                    html += `<div><span class="label">Error Code:</span> <span class="value">${chr.value.error_code}</span></div>`;
+                                }
+                                html += '</div>';
+                            }
+
+                            html += '</div>';
+
+                            const hasRead = chr.properties & 0x02;
+                            const hasWrite = (chr.properties & 0x08) || (chr.properties & 0x04);
+                            const hasNotify = chr.properties & 0x10;
+                            const hasIndicate = chr.properties & 0x20;
+
+                            if (hasRead || hasWrite || hasNotify || hasIndicate) {
+                                html += '<div style="margin-top: 8px; padding: 8px; background: #f5f5f5; border-radius: 4px;">';
+                                html += '<div><span class="label">Hooks:</span></div>';
+
+                                if (hasRead) {
+                                    const hookName = (chr.dynamic && chr.dynamic.on_read) ? chr.dynamic.on_read : '';
+                                    const displayValue = hookName || '<i>not set</i>';
+                                    html += '<div style="margin-left: 12px;">';
+                                    html += `<span class="label">on_read:</span> <span class="value" id="hook-${svcIdx}-${chrIdx}-on_read">${displayValue}</span>`;
+                                    html += ` <button onclick="editHook(${svcIdx}, ${chrIdx}, 'on_read', '${hookName.replace(/'/g, "\'")}')">Edit</button>`;
+                                    html += '</div>';
+                                }
+
+                                if (hasWrite) {
+                                    const hookName = (chr.dynamic && chr.dynamic.on_write) ? chr.dynamic.on_write : '';
+                                    const displayValue = hookName || '<i>not set</i>';
+                                    html += '<div style="margin-left: 12px;">';
+                                    html += `<span class="label">on_write:</span> <span class="value" id="hook-${svcIdx}-${chrIdx}-on_write">${displayValue}</span>`;
+                                    html += ` <button onclick="editHook(${svcIdx}, ${chrIdx}, 'on_write', '${hookName.replace(/'/g, "\'")}')">Edit</button>`;
+                                    html += '</div>';
+                                }
+
+                                if (hasNotify) {
+                                    const hookName = (chr.dynamic && chr.dynamic.on_notify) ? chr.dynamic.on_notify : '';
+                                    const displayValue = hookName || '<i>not set</i>';
+                                    html += '<div style="margin-left: 12px;">';
+                                    html += `<span class="label">on_notify:</span> <span class="value" id="hook-${svcIdx}-${chrIdx}-on_notify">${displayValue}</span>`;
+                                    html += ` <button onclick="editHook(${svcIdx}, ${chrIdx}, 'on_notify', '${hookName.replace(/'/g, "\'")}')">Edit</button>`;
+                                    html += '</div>';
+                                }
+
+                                if (hasIndicate) {
+                                    const hookName = (chr.dynamic && chr.dynamic.on_indicate) ? chr.dynamic.on_indicate : '';
+                                    const displayValue = hookName || '<i>not set</i>';
+                                    html += '<div style="margin-left: 12px;">';
+                                    html += `<span class="label">on_indicate:</span> <span class="value" id="hook-${svcIdx}-${chrIdx}-on_indicate">${displayValue}</span>`;
+                                    html += ` <button onclick="editHook(${svcIdx}, ${chrIdx}, 'on_indicate', '${hookName.replace(/'/g, "\'")}')">Edit</button>`;
+                                    html += '</div>';
+                                }
+
+                                html += '</div>';
+                            }
+
+                            if (chr.value && chr.value.data) {
+                                html += `<div><span class="label">Value (hex):</span> <span class="value" id="value-${svcIdx}-${chrIdx}">${chr.value.data}</span>`;
+                                html += ` <button onclick="editValue(${svcIdx}, ${chrIdx}, '${chr.value.data}')">Edit</button></div>`;
+                                let ascii = hexToAscii(chr.value.data);
+                                if (ascii) {
+                                    html += `<div><span class="label">Value (ascii):</span> <span class="value">${ascii}</span></div>`;
+                                }
+                            } else {
+                                html += `<div><span class="label">Value (hex):</span> <span class="value" id="value-${svcIdx}-${chrIdx}"><i>not set</i></span>`;
+                                html += ` <button onclick="editValue(${svcIdx}, ${chrIdx}, '')">Edit</button></div>`;
+                            }
+
+                            if (chr.descriptors && chr.descriptors.length > 0) {
+                                chr.descriptors.forEach(dsc => {
+                                    html += '<div class="descriptor">';
+                                    html += `<div><span class="label">Descriptor:</span> <span class="value">${getUuidName(dsc.uuid)} (${dsc.uuid})</span></div>`;
+                                    html += `<div><span class="label">Handle:</span> <span class="value">${dsc.handle}</span></div>`;
+                                    if (dsc.value) {
+                                        html += `<div><span class="label">Value:</span> <span class="value">${dsc.value}</span></div>`;
+                                    }
+                                    html += '</div>';
+                                });
+                            }
+
+                            html += '</div>';
+                        });
+                    }
+
+                    html += '</div></div>';
+                });
+            }
+
+            html += '</div></div>';
+            document.getElementById('services-section').innerHTML = html;
+        }
+
+        function toggleServicesSection() {
+            const content = document.getElementById('services-content');
+            const header = document.querySelector('.section-header');
+            if (content.style.display === 'none') {
+                content.style.display = 'block';
+                header.textContent = header.textContent.replace('⯈', '⯆');
+            } else {
+                content.style.display = 'none';
+                header.textContent = header.textContent.replace('⯆', '⯈');
+            }
+        }
+
+        function toggleService(idx) {
+            const content = document.getElementById(`service-${idx}`);
+            const toggle = document.getElementById(`toggle-${idx}`);
+            if (content.style.display === 'none') {
+                content.style.display = 'block';
+                toggle.textContent = '⯆';
+            } else {
+                content.style.display = 'none';
+                toggle.textContent = '⯈';
+            }
+        }
+
+        function updateSecurity(svcIdx, chrIdx, secType) {
+            const encCheckbox = document.getElementById(`enc-${svcIdx}-${chrIdx}`);
+            const authCheckbox = document.getElementById(`auth-${svcIdx}-${chrIdx}`);
+
+            // Authentication requires encryption
+            if (secType === 'authentication' && authCheckbox.checked) {
+                encCheckbox.checked = true;
+            }
+
+            // If disabling encryption, also disable authentication
+            if (secType === 'encryption' && !encCheckbox.checked) {
+                authCheckbox.checked = false;
+            }
+
+            const updateData = {
+                service_index: svcIdx,
+                characteristic_index: chrIdx,
+                value: {
+                    encryption_required: encCheckbox.checked,
+                    authentication_required: authCheckbox.checked
+                }
+            };
+
+            fetch(`/api/device/${deviceId}/ble`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(updateData)
+            })
+            .then(r => { if (!r.ok) throw new Error('Update failed'); return r.json(); })
+            .then(() => {
+                if (window.bleData && window.bleData.services[svcIdx] && window.bleData.services[svcIdx].characteristics[chrIdx]) {
+                    const chr = window.bleData.services[svcIdx].characteristics[chrIdx];
+                    if (!chr.value) chr.value = {};
+                    chr.value.encryption_required = encCheckbox.checked;
+                    chr.value.authentication_required = authCheckbox.checked;
+                }
+                alert('Security settings updated!');
+            })
+            .catch(err => {
+                alert('Error: ' + err);
+                // Revert on error
+                if (window.bleData && window.bleData.services[svcIdx] && window.bleData.services[svcIdx].characteristics[chrIdx]) {
+                    const chr = window.bleData.services[svcIdx].characteristics[chrIdx];
+                    encCheckbox.checked = chr.value.encryption_required || false;
+                    authCheckbox.checked = chr.value.authentication_required || false;
+                }
+            });
+        }
+
+        function patchBleCharacteristic(svcIdx, chrIdx, updates) {
+            const updateData = {
+                service_index: svcIdx,
+                characteristic_index: chrIdx,
+                ...updates
+            };
+            return fetch(`/api/device/${deviceId}/ble`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(updateData)
+            })
+            .then(r => {
+                if (!r.ok) throw new Error('Update failed');
+                return r.json();
+            });
+        }
+
+        function editHook(svcIdx, chrIdx, hookType, currentValue) {
+            const newValue = prompt(`Edit ${hookType}:`, currentValue);
+
+            if (newValue !== null) {
+                const characteristic = window.bleData.services[svcIdx].characteristics[chrIdx];
+                if (!characteristic.dynamic) characteristic.dynamic = {};
+
+                if (newValue.trim()) {
+                    characteristic.dynamic[hookType] = newValue;
+                } else {
+                    delete characteristic.dynamic[hookType];
+                }
+
+                patchBleCharacteristic(svcIdx, chrIdx, { dynamic: characteristic.dynamic })
+                    .then(() => {
+                        const displayValue = newValue.trim() || '<i>not set</i>';
+                        document.getElementById(`hook-${svcIdx}-${chrIdx}-${hookType}`).innerHTML = displayValue;
+                        alert('Updated!');
+                    })
+                    .catch(err => alert('Error: ' + err));
+            }
+        }
+
+        function editValue(svcIdx, chrIdx, currentValue) {
+            const newValue = prompt('Edit value (hex):', currentValue);
+
+            if (newValue !== null) {
+                patchBleCharacteristic(svcIdx, chrIdx, { value: newValue })
+                    .then(() => {
+                        const displayValue = newValue.trim() || '<i>not set</i>';
+                        document.getElementById(`value-${svcIdx}-${chrIdx}`).innerHTML = displayValue;
+                        alert('Updated!');
+                    })
+                    .catch(err => alert('Error: ' + err));
+            }
+        }
+
+        function editProperties(svcIdx, chrIdx, currentProps) {
+            const propsMapping = {
+                'broadcast': 0x01,
+                'read': 0x02,
+                'write-without-response': 0x04,
+                'write': 0x08,
+                'notify': 0x10,
+                'indicate': 0x20
+            };
+
+            let message = 'Properties (comma-separated):\nCurrent: ' + getProperties(currentProps).join(', ');
+            const newValue = prompt(message, getProperties(currentProps).join(', '));
+
+            if (newValue !== null) {
+                const propNames = newValue.split(',').map(p => p.trim().toLowerCase()).filter(p => p);
+                let newProps = 0;
+                propNames.forEach(name => {
+                    if (propsMapping[name]) {
+                        newProps |= propsMapping[name];
+                    }
+                });
+
+                patchBleCharacteristic(svcIdx, chrIdx, { properties: newProps })
+                    .then(() => {
+                        let propsHtml = '';
+                        getProperties(newProps).forEach(p => {
+                            propsHtml += `<span class="properties">${p}</span>`;
+                        });
+                        document.getElementById(`props-${svcIdx}-${chrIdx}`).innerHTML = propsHtml;
+                        alert('Updated! Refresh to see updated hooks.');
+                    })
+                    .catch(err => alert('Error: ' + err));
+            }
+        }
+
+    </script>
+</body>
+</html>

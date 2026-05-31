@@ -1,0 +1,382 @@
+<script>document.title = "BLE Central";</script>
+<link rel="stylesheet" href="/static/central.css">
+
+<div class="container">
+
+  <div class="header">
+    <div class="device-icon">
+      <img id="deviceImage" src="" alt="" style="display:none">
+      <span class="fallback" id="iconFallback">📡</span>
+    </div>
+    <div class="device-info">
+      <h1 id="deviceName">BLE Central</h1>
+      <div class="device-meta">Device ID: <span id="deviceIdSpan">—</span></div>
+      <span id="statusBadge" class="status-badge status-inactive">Inactive</span>
+    </div>
+    <span id="wsStatus" class="ws-status ws-disconnected">WS Off</span>
+  </div>
+
+  <div class="main-content">
+
+    <div class="controls">
+      <button id="btnStart" class="btn btn-primary">Start Central</button>
+      <button id="btnStop"  class="btn btn-danger" disabled>Stop Central</button>
+    </div>
+
+    <div id="bleStatusBar" class="ble-status ble-unknown">
+      <span class="ble-dot"></span>
+      <span id="bleStatusText">Not connected to target device</span>
+    </div>
+
+    <div id="breadcrumb" class="breadcrumb"></div>
+
+    <div id="statePanel" class="panel" style="display:none;">
+      <div class="panel-header">Device States</div>
+      <div class="panel-content">
+        <div id="stateList" class="state-list"></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-header">
+        <button id="btnBack" class="btn-back" disabled>&#8592; Back</button>
+        <span class="panel-title" id="menuTitle">Menu</span>
+      </div>
+      <div class="panel-content">
+        <div id="menuList" class="menu-list">
+          <div class="menu-empty">Press "Start Central" to begin.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Debug log panel -->
+    <div class="panel">
+      <div class="panel-header">Debug Log</div>
+      <div class="debug-controls">
+
+        <!-- WebSocket toggle — standalone row -->
+        <label class="debug-toggle">
+          <input type="checkbox" id="chkWsLog">
+          WebSocket messages
+        </label>
+
+        <!-- ESP log group: toggle + tag manager together -->
+        <div class="esp-log-group">
+          <label class="debug-toggle">
+            <input type="checkbox" id="chkEspLog">
+            ESP logs (Error, Warning)
+          </label>
+
+          <!-- Only visible when ESP logs are ON -->
+          <label class="debug-toggle" id="espInfoLogRow" style="display:none">
+            <input type="checkbox" id="chkEspInfoLog">
+            ESP logs (Info)
+          </label>
+
+          <!-- Only visible when ESP logs AND INFO logs are ON -->
+          <div class="tag-manager" id="tagManagerPanel" style="display:none">
+            <div class="tag-manager-label">INFO tag filter:</div>
+            <div class="tag-list" id="tagList">
+              <span class="tag-list-empty" id="tagListEmpty">No tags — all INFO</span>
+            </div>
+            <div class="tag-add-row">
+              <input type="text" id="newTagInput" placeholder="e.g. BLE central - core">
+              <button type="button" id="addTagBtn">+ Add</button>
+            </div>
+          </div>
+        </div>
+
+
+      </div>
+      <div id="debugLog" class="debug-log">
+        <div class="log-entry log-I">00:00:00 Debug log initialized</div>
+      </div>
+    </div>
+
+  </div>
+
+  <div id="textNotification" class="text-notification"></div>
+</div>
+
+<script>
+// ─────────────────────────────────────────────
+// Global state
+// ─────────────────────────────────────────────
+let isCentralActive = false;
+let menuDef         = null;
+let navStack        = [];
+let dynMenus        = {};
+let states          = {};
+
+
+// ─────────────────────────────────────────────
+// BLE status
+// ─────────────────────────────────────────────
+function setBleStatus(status) {
+  const bar  = document.getElementById('bleStatusBar');
+  const text = document.getElementById('bleStatusText');
+  const map  = {
+    scanning:     { cls: 'ble-scanning',     label: 'Scanning for target device…',  logLevel: 'I' },
+    connecting:   { cls: 'ble-connecting',   label: 'Trying to connect…',           logLevel: 'I' },
+    connected:    { cls: 'ble-connected',    label: 'Connected to target device',   logLevel: 'I' },
+    disconnected: { cls: 'ble-disconnected', label: 'Disconnected from target device', logLevel: 'W' },
+  };
+  const entry = map[status];
+  if (entry) {
+    bar.className    = `ble-status ${entry.cls}`;
+    text.textContent = entry.label;
+    addEspLog(entry.logLevel, 'ble', entry.label);
+  } else {
+    bar.className    = 'ble-status ble-unknown';
+    text.textContent = 'Not connected to target device';
+  }
+}
+
+// ─────────────────────────────────────────────
+// Device states
+// ─────────────────────────────────────────────
+function renderStates() {
+  const list  = document.getElementById('stateList');
+  const panel = document.getElementById('statePanel');
+  list.innerHTML = '';
+  const keys = Object.keys(states);
+  if (!keys.length) { panel.style.display = 'none'; return; }
+  panel.style.display = 'block';
+  keys.forEach(key => {
+    const st  = states[key];
+    const cls = st.value === 'unknown' ? 'state-unknown'
+              : st.value === 'ON'      ? 'state-on'
+              : st.value === 'OFF'     ? 'state-off'
+              : 'state-loading';
+    const div = document.createElement('div');
+    div.className = 'state-item';
+    div.innerHTML = `<span>${escHtml(st.name)}</span><span class="state-value ${cls}">${escHtml(st.displayValue)}</span>`;
+    list.appendChild(div);
+  });
+}
+
+function updateState(key, value) {
+  if (!states[key]) { addEspLog('W', 'web', `Unknown state key "${key}"`); return; }
+  states[key].value        = value;
+  states[key].displayValue = value.toUpperCase();
+  renderStates();
+  addEspLog('I', 'state', `"${states[key].name}": ${value}`);
+}
+
+
+// ─────────────────────────────────────────────
+// Start / Stop
+// ─────────────────────────────────────────────
+function startCentral() {
+  if (!deviceId) { addEspLog('E', 'web', 'No device ID'); return; }
+  wsSend({ type: 'central', action: 'start', device: deviceId });
+  // UI will update when server responds with central_status
+}
+
+function stopCentral() {
+  wsSend({ type: 'central', action: 'stop' });
+  // UI will update when server responds with central_status
+}
+
+function activateCentralUI() {
+  isCentralActive = true;
+  document.getElementById('btnStart').disabled = true;
+  document.getElementById('btnStop').disabled  = false;
+  const sb = document.getElementById('statusBadge');
+  sb.textContent = 'Central active'; sb.className = 'status-badge status-active';
+  loadMenu();
+}
+
+function deactivateCentralUI() {
+  isCentralActive = false;
+  document.getElementById('btnStart').disabled = false;
+  document.getElementById('btnStop').disabled  = true;
+  const sb = document.getElementById('statusBadge');
+  sb.textContent = 'Inactive'; sb.className = 'status-badge status-inactive';
+  setBleStatus('unknown');
+  states = {}; document.getElementById('statePanel').style.display = 'none';
+  if (textTimeout) clearTimeout(textTimeout);
+  if (ws) { ws.close(); ws = null; }
+  menuDef = null; navStack = []; dynMenus = {};
+  renderEmpty('Central stopped.');
+}
+
+// ─────────────────────────────────────────────
+// Menu load
+// ─────────────────────────────────────────────
+function loadMenu() {
+  if (!deviceId) return;
+  document.getElementById('menuList').innerHTML = '<div class="menu-loading">Loading menu…</div>';
+  fetch(`/api/device/${deviceId}/menu`)
+    .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+    .then(data => {
+      menuDef = data; dynMenus = {}; navStack = [];
+      states  = {};
+      if (Array.isArray(data.states)) {
+        data.states.forEach(s => { states[s.key] = { name: s.name, value: 'unknown', displayValue: '?' }; });
+        renderStates();
+      }
+      const startId = data.initial_menu || (data.menus?.[0]?.id);
+      if (!startId) { renderEmpty('No menus defined'); return; }
+      navigateTo(startId, false);
+    })
+    .catch(err => { addEspLog('E', 'web', `Menu load failed: ${err.message}`); renderEmpty('Failed to load menu'); });
+}
+
+// ─────────────────────────────────────────────
+// Menu navigation
+// ─────────────────────────────────────────────
+function findNode(id) {
+  return dynMenus[id] || menuDef?.menus?.find(n => n.id === id) || null;
+}
+
+function navigateTo(id, push = true) {
+  const node = findNode(id);
+  if (!node) { addEspLog('W', 'menu', `Node "${id}" not found`); return; }
+  if (push) navStack.push(id); else navStack = [id];
+  renderMenu(node);
+}
+
+function navigateBack() {
+  if (navStack.length <= 1) return;
+  navStack.pop();
+  const node = findNode(navStack[navStack.length - 1]);
+  if (node) renderMenu(node);
+}
+
+function renderMenu(node) {
+  document.getElementById('menuTitle').textContent = node.title || node.id;
+  document.getElementById('btnBack').disabled      = (navStack.length <= 1);
+  renderBreadcrumb();
+  const list = document.getElementById('menuList');
+  list.innerHTML = '';
+  if (!node.items?.length) { list.innerHTML = '<div class="menu-empty">No items</div>'; return; }
+  node.items.forEach(item => {
+    const btn = document.createElement('button');
+    btn.className = 'menu-item';
+    btn.innerHTML = `<span>${escHtml(item.label)}</span><span class="arrow">›</span>`;
+    btn.addEventListener('click', () => handleMenuSelect(item.id));
+    list.appendChild(btn);
+  });
+}
+
+function renderBreadcrumb() {
+  const bc = document.getElementById('breadcrumb');
+  bc.innerHTML = '';
+  navStack.forEach((id, idx) => {
+    if (idx > 0) { const sep = document.createElement('span'); sep.className = 'breadcrumb-sep'; sep.textContent = '›'; bc.appendChild(sep); }
+    const label = findNode(id)?.title || id;
+    if (idx === navStack.length - 1) {
+      const s = document.createElement('span'); s.className = 'breadcrumb-current'; s.textContent = label; bc.appendChild(s);
+    } else {
+      const b = document.createElement('button'); b.className = 'breadcrumb-item'; b.textContent = label;
+      const i = idx;
+      b.addEventListener('click', () => { navStack.splice(i + 1); const n = findNode(navStack.at(-1)); if (n) renderMenu(n); });
+      bc.appendChild(b);
+    }
+  });
+}
+
+function renderEmpty(msg) {
+  document.getElementById('menuList').innerHTML    = `<div class="menu-empty">${escHtml(msg)}</div>`;
+  document.getElementById('menuTitle').textContent = 'Menu';
+  document.getElementById('btnBack').disabled      = true;
+  document.getElementById('breadcrumb').innerHTML  = '';
+}
+
+function handleMenuSelect(itemId) {
+  wsSend({ type: "central", action: 'menu_select', id: itemId });
+  const node = findNode(itemId);
+  if (node) navigateTo(itemId, true);
+}
+
+document.getElementById('btnBack').addEventListener('click', () => {
+  wsSend({ type: 'menu_back' });
+  navigateBack();
+});
+
+
+// ─────────────────────────────────────────────
+// Incoming WS messages
+// ─────────────────────────────────────────────
+function handleWsMessage(cmd) {
+  switch (cmd.type) {
+    case 'central_status':
+      if (cmd.status === 'started' && cmd.device === deviceId) {
+        if (!isCentralActive) activateCentralUI();
+      } else if (cmd.status === 'stopped') {
+        if (isCentralActive) deactivateCentralUI();
+      }
+      addEspLog('I', 'central', `Central status: ${cmd.status}${cmd.device ? ' / ' + cmd.device : ''}`);
+      break;
+
+    case 'central':
+      setBleStatus(cmd.status);
+      break;
+
+    case 'text':
+      showTextNotification(cmd.text || '');
+      break;
+
+    case 'log':
+      addEspLog(cmd.level, cmd.tag, cmd.msg);
+      break;
+
+    case 'menu': {
+      const node = findNode(cmd.id);
+      if (!node) { addEspLog('W', 'menu', `Unknown node "${cmd.id}"`); break; }
+      const top = navStack.at(-1);
+      if (top !== cmd.id) {
+        if (navStack.includes(cmd.id)) {
+          while (navStack.at(-1) !== cmd.id) navStack.pop();
+        } else {
+          navStack.push(cmd.id);
+        }
+      }
+      if (cmd.title) node.title = cmd.title;
+      renderMenu(node);
+      break;
+    }
+
+    case 'central_state':
+      if (cmd.key && cmd.value !== undefined) updateState(cmd.key, cmd.value);
+      break;
+
+    case 'menu_dyn':
+      if (cmd.id) {
+        dynMenus[cmd.id] = { id: cmd.id, title: cmd.title || cmd.id, items: cmd.items || [] };
+        if (navStack.at(-1) === cmd.id) renderMenu(dynMenus[cmd.id]);
+      }
+      break;
+
+    default:
+      if (cmd.action) addEspLog('I', 'ble', `${cmd.action} svc=${cmd.svc||''} chr=${cmd.chr||''} status=${cmd.status??''}`);
+      break;
+  }
+}
+
+// ─────────────────────────────────────────────
+// Button wiring
+// ─────────────────────────────────────────────
+document.getElementById('btnStart').addEventListener('click', startCentral);
+document.getElementById('btnStop').addEventListener('click',  stopCentral);
+
+// ─────────────────────────────────────────────
+// Init
+// ─────────────────────────────────────────────
+function init() {
+  deviceId = getDeviceIdFromURL('central'); 
+  wsReconnectGuard = () => isCentralActive; // drives WS auto-reconnect
+  document.getElementById('deviceIdSpan').textContent = deviceId || 'Not found';
+  if (deviceId) {
+    loadDeviceInfo();
+    loadWslogFilter();
+    addEspLog('I', 'web', 'Press "Start Central" to connect.');
+  } else {
+    addEspLog('W', 'web', 'No device ID in URL — expected /central/<deviceId>');
+    renderEmpty('No device ID in URL');
+  }
+}
+
+document.addEventListener('DOMContentLoaded', init);
+</script>

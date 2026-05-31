@@ -1,0 +1,20 @@
+diff --git a/components/bt/host/nimble/nimble/nimble/host/src/ble_sm.c b/components/bt/host/nimble/nimble/nimble/host/src/ble_sm.c
+--- a/components/bt/host/nimble/nimble/nimble/host/src/ble_sm.c
++++ b/components/bt/host/nimble/nimble/nimble/host/src/ble_sm.c
+@@ -1302,6 +1302,16 @@ ble_sm_enc_key_refresh_rx(const struct ble_hci_ev_enc_key_refresh *ev)
+     ble_sm_enc_event_rx(le16toh(ev->conn_handle), ev->status, 1);
+ }
+ 
++
++// BLESPlo.it patch
++void
++ble_sm_set_pairing_rsp_cb(ble_sm_pairing_rsp_fn cb, void *arg)
++{
++    ble_sm_pairing_rsp_cb = cb;
++    ble_sm_pairing_rsp_cb_arg = arg;
++}
++
++
+ /*****************************************************************************
+  * $ltk                                                                      *
+  *****************************************************************************/

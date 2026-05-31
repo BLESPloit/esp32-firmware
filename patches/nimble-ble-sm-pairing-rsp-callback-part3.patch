@@ -1,0 +1,16 @@
+diff --git a/components/bt/host/nimble/nimble/nimble/host/src/ble_sm.c b/components/bt/host/nimble/nimble/nimble/host/src/ble_sm.c
+--- a/components/bt/host/nimble/nimble/nimble/host/src/ble_sm.c
++++ b/components/bt/host/nimble/nimble/nimble/host/src/ble_sm.c
+@@ -2008,3 +2008,12 @@
+     rsp = (struct ble_sm_pair_cmd *)(*om)->om_data;
+ 
++    // BLESPlo.it patch: expose raw pairing response via callback if registered
++    // Invoke callback if registered - do this before validation
++    // so app can see response even if it will be rejected
++    if (ble_sm_pairing_rsp_cb != NULL) {
++        // cast to public ble_sm_pairing_params which is 1:1 with private ble_sm_pair_cmd
++        ble_sm_pairing_rsp_cb(conn_handle, (struct ble_sm_pairing_params *)rsp, ble_sm_pairing_rsp_cb_arg);
++    }
++    // ===== END OF PATCH =====
++
+     ble_hs_lock();

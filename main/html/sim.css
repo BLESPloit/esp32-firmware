@@ -1,0 +1,103 @@
+/* ── sim.css  ─  Simulator-specific overrides & additions ── */
+
+/* Wider container for the two-column layout */
+.container { max-width: 1200px; }
+
+/* Larger device icon in header */
+.device-icon {
+  width: 128px; height: 128px;
+  font-size: 64px;
+}
+.device-icon .fallback { font-size: 64px; display: none; }
+.device-info h1 { font-size: 24px; margin-bottom: 8px; }
+.device-meta    { margin-top: 8px; font-size: 14px; line-height: 1.6; }
+.device-description { opacity: 0.9; margin-top: 4px; }
+.device-author      { opacity: 0.8; font-size: 13px; margin-top: 4px; }
+.device-link        { margin-top: 4px; }
+.device-link a      { color: var(--color-brand-accent); text-decoration: none; font-size: 13px; }
+.device-link a:hover{ text-decoration: underline; }
+
+/* ws-status sits in the header (overrides common's inline badge) */
+.ws-status {
+  padding: 8px 12px; border-radius: 6px;
+  font-size: 13px; font-weight: bold; display: inline-block;
+}
+
+/* Two-column main grid */
+.main-content {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+  padding: 20px;
+}
+
+/* ESP-IDF console (replaces .debug-log for this page) */
+.console-log {
+  background: #1e1e1e; color: #d4d4d4;
+  font-family: 'Courier New', monospace;
+  font-size: 12px; height: 300px;
+  overflow-y: auto; padding: 12px; line-height: 1.6;
+}
+.log-entry   { margin-bottom: 4px; }
+.log-info    { color: #4ec9b0; }
+.log-warning { color: #dcdcaa; }
+.log-error   { color: #f48771; }
+.log-debug   { color: #9cdcfe; }
+
+/* Canvas display area */
+.display-container {
+  display: flex; flex-direction: column;
+  align-items: center; gap: 16px;
+}
+.canvas-wrapper {
+  position: relative; background: #000;
+  border-radius: 8px; padding: 10px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+}
+#display {
+  display: block; border: 2px solid #333; border-radius: 4px;
+  image-rendering: pixelated; image-rendering: crisp-edges;
+}
+
+/* Interface buttons (physical-button triggers) */
+.interface-buttons {
+  display: flex; flex-wrap: wrap; gap: 8px;
+  width: 100%; max-width: 400px; justify-content: center;
+}
+.interface-btn {
+  padding: 8px 16px; border: 2px solid var(--color-brand); border-radius: 6px;
+  background: white; color: var(--color-text-heading);
+  font-size: 14px; font-weight: 600;
+  cursor: pointer; transition: all 0.2s ease; white-space: nowrap;
+}
+.interface-btn:hover {
+  background: var(--color-brand); color: white;
+  transform: translateY(-2px);
+  box-shadow: 0 4px 8px rgba(0,110,171,0.3);
+}
+.interface-btn:active { transform: translateY(0); }
+
+.interface-buttons-hint {
+  font-size: 11px;
+  color: #888;
+  font-style: italic;
+  text-align: center;
+  margin-top: 4px;
+}
+
+/* ── Responsive ── */
+@media (max-width: 768px) {
+  body { padding: 10px; }
+  .header { flex-direction: column; text-align: center; padding: 16px; }
+  .device-icon { width: 128px; height: 128px; }
+  .device-info h1 { font-size: 20px; }
+  .main-content { grid-template-columns: 1fr; gap: 16px; padding: 16px; }
+  .console-log { height: 250px; font-size: 11px; }
+  #display { width: 256px !important; height: 256px !important; }
+  .btn { padding: 10px 20px; font-size: 13px; }
+}
+@media (max-width: 480px) {
+  .device-info h1 { font-size: 18px; }
+  .console-log { height: 200px; font-size: 10px; }
+  #display { width: 200px !important; height: 200px !important; }
+}
