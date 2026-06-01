@@ -3,7 +3,7 @@
 cmake_minimum_required(VERSION 3.5)
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-project(BLESPloit VERSION 0.0.2)
+project(BLESPloit VERSION 1.0.0)
 
 # force colored compilation output 
 add_compile_options (-fdiagnostics-color=always)
