@@ -162,6 +162,21 @@ void web_scan_push_device(const ble_scanned_device_t *dev, scan_push_reason_t re
              dev->addr[5], dev->addr[4], dev->addr[3],
              dev->addr[2], dev->addr[1], dev->addr[0]);
 
+    if (reason == SCAN_PUSH_RSSI) {
+        cJSON *d = cJSON_CreateObject();
+        cJSON_AddStringToObject(d, "type",   "scan_device");
+        cJSON_AddStringToObject(d, "update", "rssi");
+        cJSON_AddStringToObject(d, "addr",   addr_str);
+        cJSON_AddNumberToObject(d, "rssi",   dev->rssi);
+        char *s = cJSON_PrintUnformatted(d);
+        cJSON_Delete(d);
+        if (s) {
+            websocket_broadcast_json_transient(s);
+            free(s);
+        }
+        return;
+    }
+
     char escaped_name[64];
     json_escape_string(dev->name, escaped_name, sizeof(escaped_name));
 
@@ -194,9 +209,9 @@ void web_scan_push_device(const ble_scanned_device_t *dev, scan_push_reason_t re
 
     char *s = cJSON_PrintUnformatted(d);
     cJSON_Delete(d);
-    if (s) { 
-        websocket_broadcast_json_transient(s); 
-        free(s); 
+    if (s) {
+        websocket_broadcast_json_transient(s);
+        free(s);
     }
 }
 

@@ -97,20 +97,11 @@ static int ble_scanner_gap_event_handler(struct ble_gap_event *event, void *arg)
 
 // ── Advertisement scanning helpers ────────────────────────────────────────────────── 
 
-typedef enum {
-    RSSI_BAND_STRONG   = 0,   // >= -60
-    RSSI_BAND_MEDIUM   = 1,   // -60 .. -75
-    RSSI_BAND_WEAK     = 2,   // -75 .. -90
-    RSSI_BAND_CRITICAL = 3,   // < -90
-} rssi_band_t;
-
-static rssi_band_t rssi_get_band(int8_t rssi) {
-    if (rssi >= -60) return RSSI_BAND_STRONG;
-    if (rssi >= -75) return RSSI_BAND_MEDIUM;
-    if (rssi >= -90) return RSSI_BAND_WEAK;
-    return RSSI_BAND_CRITICAL;
+static int rssi_delta_db(int8_t current, int8_t last_pushed)
+{
+    int delta = (int)current - (int)last_pushed;
+    return delta < 0 ? -delta : delta;
 }
-
 
 /**
  * Derives the BLE PDU type from the advertisement properties bitmask.
@@ -279,6 +270,7 @@ void process_scanned_device(uint8_t *addr, uint8_t addr_type, int8_t rssi,
             scanned_devices[device_idx].addr_type = addr_type;
             scanned_devices[device_idx].rssi = rssi;
             scanned_devices[device_idx].last_pushed_rssi = rssi;
+            scanned_devices[device_idx].last_pushed_rssi_ms = esp_log_timestamp();
             scanned_devices[device_idx].is_extended = !is_legacy;
             scanned_devices[device_idx].is_connectable = is_connectable;
             scanned_devices[device_idx].phy = phy;
@@ -356,12 +348,16 @@ void process_scanned_device(uint8_t *addr, uint8_t addr_type, int8_t rssi,
                         // if mark_seen returns false (OOM or cap reached) → silently skip
                     }
                 }
-                // RSSI update
+                // RSSI update: significant change only (min dB delta + min interval)
                 if (!should_push) {  // only check RSSI if no higher-priority push is already queued
-                    if (rssi_get_band(rssi) != rssi_get_band(scanned_devices[device_idx].last_pushed_rssi)) {
+                    uint32_t now_ms = esp_log_timestamp();
+                    int db_delta = rssi_delta_db(rssi, scanned_devices[device_idx].last_pushed_rssi);
+                    if (db_delta >= SCAN_RSSI_PUSH_MIN_DB_DELTA
+                        && (now_ms - scanned_devices[device_idx].last_pushed_rssi_ms) >= SCAN_RSSI_PUSH_MIN_MS) {
                         should_push  = true;
                         push_reason  = SCAN_PUSH_RSSI;
                         scanned_devices[device_idx].last_pushed_rssi = rssi;
+                        scanned_devices[device_idx].last_pushed_rssi_ms = now_ms;
                     }
                 }
 

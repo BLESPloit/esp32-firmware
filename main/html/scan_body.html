@@ -314,8 +314,13 @@ function handleWsMessage(cmd) {
         updateUIState(cmd.scanning);
     }
     else if (cmd.type === 'scan_device') {
-        devices[cmd.addr] = cmd;
-        renderDevice(cmd);
+        if (cmd.update === 'rssi' && devices[cmd.addr]) {
+            devices[cmd.addr].rssi = cmd.rssi;
+            renderDevice(devices[cmd.addr]);
+        } else {
+            devices[cmd.addr] = { ...devices[cmd.addr], ...cmd };
+            renderDevice(devices[cmd.addr]);
+        }
         updateDeviceCount();
     }
     else if (cmd.type === 'scan_device_lost') {

@@ -7,6 +7,8 @@
 #define MAX_SCANNED_SCAN_RESP_DATA_LEN 31
 #define BLE_SCAN_DURATION_MS 30000
 #define MAX_SEEN_ADV_PAYLOADS  4   // cap per device, allocated on first rotation
+#define SCAN_RSSI_PUSH_MIN_MS       2000
+#define SCAN_RSSI_PUSH_MIN_DB_DELTA 20
 
 typedef struct {
     uint8_t  data[MAX_SCANNED_ADV_DATA_LEN];
@@ -18,7 +20,8 @@ typedef struct {
     uint8_t addr[6];
     uint8_t addr_type;
     int8_t rssi;
-    int8_t last_pushed_rssi; 
+    int8_t last_pushed_rssi;
+    uint32_t last_pushed_rssi_ms;
     char name[32];
     uint8_t adv_data[MAX_SCANNED_ADV_DATA_LEN];
     uint8_t adv_data_len;
