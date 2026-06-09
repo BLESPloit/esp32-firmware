@@ -59,8 +59,8 @@ esp_err_t start_web_server(void)
     config.uri_match_fn = httpd_uri_match_wildcard; // set wildcard matching function
     config.max_open_sockets = 10;  // Increase from default 7 to support list of devices with multiple pictures
     config.lru_purge_enable = true; // Enable LRU socket purging
-    config.recv_wait_timeout = 5;   // Reduce timeout to 5 seconds
-    config.send_wait_timeout = 5;
+    config.recv_wait_timeout = 3;   // reduce timeouts
+    config.send_wait_timeout = 1;
    
     rc = httpd_start(&server, &config);
 

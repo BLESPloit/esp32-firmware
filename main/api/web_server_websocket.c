@@ -7,6 +7,9 @@
 #include <sys/stat.h>
 #include <unistd.h> 
 #include <errno.h>
+#include <string.h>
+#include <stdlib.h>
+#include <stdint.h>
 #include "cJSON.h"
 
 #include "interface/interface_central.h"
@@ -21,6 +24,10 @@ extern device_config_t config;
 
 static int ws_client_fds[MAX_WS_CLIENTS] = {0};
 static SemaphoreHandle_t ws_clients_mutex = NULL;
+static SemaphoreHandle_t ws_send_mutex = NULL;
+
+#define WS_FIN_BIT  0x80U
+#define WS_MASK_BIT 0x80U
 
 
 // Maintain state for websocket
@@ -39,7 +46,7 @@ typedef struct {
 static smart_state_t g_smart_state = {0};
 static char g_node_id[12] = {0};   // "ESP_AABBCC\0" = 11 chars
 
-#define MAX_WS_MSG_HANDLERS 10
+#define MAX_WS_MSG_HANDLERS 15
 static ws_message_handler_fn_t g_msg_handlers[MAX_WS_MSG_HANDLERS];
 static int                     g_msg_handler_count = 0;
 
@@ -53,6 +60,14 @@ static esp_err_t smart_state_replay(int fd);
 // void smart_state_remove_element(const char* element_id); -> exposed in web_server_internal.h
 static void smart_state_clear(void);
 static esp_err_t ws_broadcast_with_state(const char* message, bool save_to_state, bool inject_src);
+static esp_err_t ws_send_frame_locked(int fd, httpd_ws_frame_t *frame);
+static void ws_evict_client(int fd);
+static esp_err_t ws_queue_broadcast(const char *json_str, bool save_to_state);
+static void ws_on_connect_cb(void *arg);
+
+typedef struct {
+    int fd;
+} ws_connect_deferred_t;
 
 
 const char *ws_get_node_id(void) { return g_node_id; }
@@ -68,6 +83,73 @@ void ws_register_message_handler(ws_message_handler_fn_t fn) {
 // Initialize mutex 
 void init_websocket_mutex(void) {
     ws_clients_mutex = xSemaphoreCreateMutex();
+    ws_send_mutex = xSemaphoreCreateMutex();
+}
+
+static size_t ws_build_frame_header(uint8_t *hdr, size_t hdr_cap, const httpd_ws_frame_t *frame)
+{
+    if (!hdr || hdr_cap < 2 || !frame) {
+        return 0;
+    }
+
+    hdr[0] = WS_FIN_BIT | (frame->type & 0x0fU);
+    size_t tx_len;
+
+    if (frame->len <= 125) {
+        hdr[1] = frame->len & 0x7fU;
+        tx_len = 2;
+    } else if (frame->len < UINT16_MAX) {
+        hdr[1] = 126;
+        hdr[2] = (frame->len >> 8U) & 0xffU;
+        hdr[3] = frame->len & 0xffU;
+        tx_len = 4;
+    } else {
+        if (hdr_cap < 10) {
+            return 0;
+        }
+        hdr[1] = 127;
+        uint8_t shift_idx = sizeof(uint64_t) - 1;
+        uint64_t len64 = frame->len;
+        for (int8_t idx = 2; idx <= 9; idx++) {
+            hdr[idx] = (len64 >> (shift_idx * 8U)) & 0xffU;
+            shift_idx--;
+        }
+        tx_len = 10;
+    }
+
+    hdr[1] &= ~WS_MASK_BIT;
+    return tx_len;
+}
+
+static esp_err_t ws_send_frame_locked(int fd, httpd_ws_frame_t *frame)
+{
+    if (!server || !ws_send_mutex || !frame) {
+        return ESP_FAIL;
+    }
+
+    uint8_t hdr[10];
+    size_t hdr_len = ws_build_frame_header(hdr, sizeof(hdr), frame);
+    if (hdr_len == 0) {
+        return ESP_FAIL;
+    }
+
+    size_t total = hdr_len + frame->len;
+    uint8_t *buf = malloc(total);
+    if (!buf) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    memcpy(buf, hdr, hdr_len);
+    if (frame->len > 0 && frame->payload) {
+        memcpy(buf + hdr_len, frame->payload, frame->len);
+    }
+
+    xSemaphoreTake(ws_send_mutex, portMAX_DELAY);
+    int sent = httpd_socket_send(server, fd, (const char *)buf, total, 0);
+    xSemaphoreGive(ws_send_mutex);
+
+    free(buf);
+    return (sent >= 0 && (size_t)sent == total) ? ESP_OK : ESP_FAIL;
 }
 
 // populate node ID (3 last bytes of BDADDR)
@@ -92,7 +174,9 @@ static void send_hello(int fd) {
     pkt.payload = (uint8_t *)s;
     pkt.len     = strlen(s);
     pkt.type    = HTTPD_WS_TYPE_TEXT;
-    httpd_ws_send_frame_async(server, fd, &pkt);
+    if (ws_send_frame_locked(fd, &pkt) != ESP_OK) {
+        ws_evict_client(fd);
+    }
     free(s);
 }
 
@@ -116,7 +200,9 @@ static void send_device_status(int fd) {
     char *s = build_device_status_json();
     if (!s) return;
     httpd_ws_frame_t pkt = {.payload=(uint8_t*)s, .len=strlen(s), .type=HTTPD_WS_TYPE_TEXT};
-    httpd_ws_send_frame_async(server, fd, &pkt);
+    if (ws_send_frame_locked(fd, &pkt) != ESP_OK) {
+        ws_evict_client(fd);
+    }
     free(s);
 }
 
@@ -151,9 +237,15 @@ static void add_ws_client(int fd) {
             ws_client_fds[i] = fd;
             ESP_LOGI(TAG, "Client %d connected (fd=%d)", i, fd);
             xSemaphoreGive(ws_clients_mutex);
-            smart_state_replay(fd);
-            send_hello(fd);
-            send_device_status(fd);
+
+            ws_connect_deferred_t *conn = malloc(sizeof(ws_connect_deferred_t));
+            if (conn) {
+                conn->fd = fd;
+                if (httpd_queue_work(server, ws_on_connect_cb, conn) != ESP_OK) {
+                    free(conn);
+                    ESP_LOGW(TAG, "Failed to queue connect work for fd=%d", fd);
+                }
+            }
             return;
         }
     }
@@ -178,6 +270,27 @@ static void remove_ws_client(int fd) {
     xSemaphoreGive(ws_clients_mutex);
 }
 
+static void ws_evict_client(int fd)
+{
+    remove_ws_client(fd);
+    if (server) {
+        httpd_sess_trigger_close(server, fd);
+    }
+}
+
+static void ws_on_connect_cb(void *arg)
+{
+    ws_connect_deferred_t *conn = (ws_connect_deferred_t *)arg;
+    if (!conn) {
+        return;
+    }
+    int fd = conn->fd;
+    free(conn);
+
+    smart_state_replay(fd);
+    send_hello(fd);
+    send_device_status(fd);
+}
 
 // Injects "src" into a JSON string. Returns heap-allocated string, caller must free.
 // Returns NULL on error (caller should fall back to original message).
@@ -244,36 +357,62 @@ esp_err_t parse_websocket_message(const char *payload) {
 }
 
 
-esp_err_t websocket_broadcast_json(const char *json_str) {
-    return ws_broadcast_with_state(json_str, true, true);
-}
-
-esp_err_t websocket_broadcast_json_transient(const char *json_str) {
-    return ws_broadcast_with_state(json_str, false, true);
-}
-
-
-// broadcast safe to call from limited tasks (NimBLE for sim_trace, wslog, ... )
 typedef struct {
-    char json[320]; 
+    char *json;
+    bool  save_to_state;
 } ws_deferred_msg_t;
 
-static void ws_deferred_send_cb(void *arg) {
+static void ws_deferred_send_cb(void *arg)
+{
     ws_deferred_msg_t *m = (ws_deferred_msg_t *)arg;
-    // runs on httpd task — full stack, safe for inject_src + LOGI
-    ws_broadcast_with_state(m->json, false, false);
+    if (!m) {
+        return;
+    }
+    ws_broadcast_with_state(m->json, m->save_to_state, true);
+    free(m->json);
     free(m);
 }
 
-esp_err_t websocket_broadcast_json_presrc_safe(const char *json_str) {
-    if (!server) return ESP_FAIL;
+static esp_err_t ws_queue_broadcast(const char *json_str, bool save_to_state)
+{
+    if (!server || !json_str) {
+        return ESP_FAIL;
+    }
+
     ws_deferred_msg_t *m = malloc(sizeof(ws_deferred_msg_t));
-    if (!m) return ESP_ERR_NO_MEM;
-    strncpy(m->json, json_str, sizeof(m->json) - 1);
-    m->json[sizeof(m->json) - 1] = '\0';
+    if (!m) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    m->json = strdup(json_str);
+    if (!m->json) {
+        free(m);
+        ESP_LOGW(TAG, "ws_queue_broadcast: strdup failed");
+        return ESP_ERR_NO_MEM;
+    }
+    m->save_to_state = save_to_state;
+
     esp_err_t r = httpd_queue_work(server, ws_deferred_send_cb, m);
-    if (r != ESP_OK) free(m);
+    if (r != ESP_OK) {
+        free(m->json);
+        free(m);
+    }
     return r;
+}
+
+esp_err_t websocket_broadcast_json(const char *json_str)
+{
+    return ws_queue_broadcast(json_str, true);
+}
+
+esp_err_t websocket_broadcast_json_transient(const char *json_str)
+{
+    return ws_queue_broadcast(json_str, false);
+}
+
+esp_err_t websocket_broadcast_json_presrc_safe(const char *json_str)
+{
+    return ws_queue_broadcast(json_str, false);
 }
 
 // WebSocket handler
@@ -317,7 +456,10 @@ static esp_err_t ws_handler(httpd_req_t *req) {
         ESP_LOGI(TAG, "PING received, sending PONG fd=%d", fd);
         ws_pkt.type = HTTPD_WS_TYPE_PONG;
         // payload=NULL, len=0 already set by memset — correct for empty pong
-        ret = httpd_ws_send_frame(req, &ws_pkt);
+        ret = ws_send_frame_locked(fd, &ws_pkt);
+        if (ret != ESP_OK) {
+            ws_evict_client(fd);
+        }
         ESP_LOGI(TAG, "PONG sent ret=%d fd=%d", ret, fd);
         return ret;
     }
@@ -388,8 +530,6 @@ static esp_err_t ws_broadcast_with_state(const char *message, bool save_to_state
         smart_state_update(message);
     }
 
-    // Only parse+reserialize when the caller hasn't already stamped src.
-    // Skipping this is critical on tasks with limited stack (e.g. nimble_host).
     char *stamped = inject_src ? ws_inject_src(message) : NULL;
     const char *to_send = stamped ? stamped : message;
 
@@ -411,33 +551,35 @@ static esp_err_t ws_broadcast_with_state(const char *message, bool save_to_state
     ws_pkt.len     = strlen(to_send);
     ws_pkt.type    = HTTPD_WS_TYPE_TEXT;
 
+    // ── Snapshot fd list; release mutex before any I/O ──────────────
+    int snapshot[MAX_WS_CLIENTS];
     xSemaphoreTake(ws_clients_mutex, portMAX_DELAY);
+    memcpy(snapshot, ws_client_fds, sizeof(snapshot));
+    xSemaphoreGive(ws_clients_mutex);                  // ← released before send
 
     int sent_count = 0;
     for (int i = 0; i < MAX_WS_CLIENTS; i++) {
-        if (ws_client_fds[i] != 0) {
-            httpd_ws_client_info_t client_info = httpd_ws_get_fd_info(server, ws_client_fds[i]);
-            if (client_info == HTTPD_WS_CLIENT_WEBSOCKET) {
-                esp_err_t ret = httpd_ws_send_frame_async(server, ws_client_fds[i], &ws_pkt);
-                if (ret == ESP_OK) {
-                    sent_count++;
-                } else {
-                    ESP_LOGW(TAG, "Failed to send to client %d: %d", i, ret);
-                    ws_client_fds[i] = 0;
-                }
-            } else {
-                ws_client_fds[i] = 0;
-            }
+        if (snapshot[i] == 0) continue;
+
+        httpd_ws_client_info_t client_info = httpd_ws_get_fd_info(server, snapshot[i]);
+        if (client_info != HTTPD_WS_CLIENT_WEBSOCKET) {
+            ws_evict_client(snapshot[i]);              // safe — mutex not held
+            continue;
+        }
+
+        esp_err_t ret = ws_send_frame_locked(snapshot[i], &ws_pkt);
+        if (ret == ESP_OK) {
+            sent_count++;
+        } else {
+            ESP_LOGW(TAG, "Failed to send to client %d: %d", i, ret);
+            ws_evict_client(snapshot[i]);              // safe — mutex not held
         }
     }
-
-    xSemaphoreGive(ws_clients_mutex);
 
     ESP_LOGI(TAG, "Broadcast %s to %d clients", to_send, sent_count);
     free(stamped);
     return ESP_OK;
 }
-
 
 // ── Maintain state ────────────────────────────────────────────────── 
 
@@ -544,15 +686,23 @@ static esp_err_t smart_state_replay(int fd) {
     // Send background first
     ws_pkt.payload = (uint8_t *)g_smart_state.background_cmd;
     ws_pkt.len = strlen(g_smart_state.background_cmd);
-    httpd_ws_send_frame_async(server, fd, &ws_pkt);
+    if (ws_pkt.len > 0 && ws_send_frame_locked(fd, &ws_pkt) != ESP_OK) {
+        xSemaphoreGive(g_smart_state.mutex);
+        ws_evict_client(fd);
+        return ESP_FAIL;
+    }
     vTaskDelay(pdMS_TO_TICKS(10));
-    
+
     // Send all active elements
     for (int i = 0; i < MAX_STATE_ELEMENTS; i++) {
         if (g_smart_state.elements[i].active) {
             ws_pkt.payload = (uint8_t *)g_smart_state.elements[i].json;
             ws_pkt.len = strlen(g_smart_state.elements[i].json);
-            httpd_ws_send_frame_async(server, fd, &ws_pkt);
+            if (ws_send_frame_locked(fd, &ws_pkt) != ESP_OK) {
+                xSemaphoreGive(g_smart_state.mutex);
+                ws_evict_client(fd);
+                return ESP_FAIL;
+            }
             vTaskDelay(pdMS_TO_TICKS(10));
         }
     }
