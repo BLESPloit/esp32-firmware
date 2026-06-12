@@ -180,7 +180,9 @@ void web_scan_push_device(const ble_scanned_device_t *dev, scan_push_reason_t re
     char escaped_name[64];
     json_escape_string(dev->name, escaped_name, sizeof(escaped_name));
 
-    char adv_hex[MAX_SCANNED_ADV_DATA_LEN * 2], scan_rsp_hex[MAX_SCANNED_SCAN_RESP_DATA_LEN * 2];
+    #define ADV_HEX_BUF_SIZE(n)  ((n) * 2 + 7)   // 2 hex/byte + 3 for "..." + 1 NUL + 3 guard margin
+
+    char adv_hex[ADV_HEX_BUF_SIZE(MAX_SCANNED_ADV_DATA_LEN)], scan_rsp_hex[ADV_HEX_BUF_SIZE(MAX_SCANNED_SCAN_RESP_DATA_LEN)];
     bytes_to_hex_string(dev->adv_data, dev->adv_data_len, dev->full_adv_len,
                         adv_hex, sizeof(adv_hex));
     if (dev->has_scan_rsp)
