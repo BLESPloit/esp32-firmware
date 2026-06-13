@@ -142,25 +142,16 @@ esp_err_t load_ble_device_for_simulation(const char *device_id) {
 
     // Initialize Lua, graphics, and interface
 
-    // Set vars path before Lua init so vars_save() knows where to write.
-    // Pass "" if no vars.json defined — lua_vars_set_path handles NULL/empty gracefully.
-    lua_vars_set_path(paths->vars ? paths->vars : "");
-
     bool lua_available = false;
     if (paths->peripheral->entry != NULL) {
         FILE *f = fopen(paths->peripheral->entry, "r");
         if (f) {
             fclose(f);
             lua_available = true;
-            esp_err_t lua_load_result = lua_init_persistent_minimal(paths->peripheral->entry, false);
+            esp_err_t lua_load_result = lua_init_persistent_minimal(
+                paths->peripheral->entry, false, paths->vars, paths->uuids);
 
-            if (lua_load_result == ESP_OK)
-            {
-                // Inject vars table into Lua state immediately after init,
-                // before on_startup fires. No-op if vars path is empty/missing.
-                lua_vars_inject(paths->vars);
-                lua_uuids_inject(paths->uuids);
-            } else {
+            if (lua_load_result != ESP_OK) {
                 WS_LOGE(TAG, "Lua script load error, check the syntax");
             }
         } else {

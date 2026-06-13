@@ -319,7 +319,7 @@ esp_err_t ble_central_load_services_and_connect(const char *device_id) {
         return ESP_FAIL;
     }
 
-    lua_init_persistent_minimal(paths->central->entry, true);
+    lua_init_persistent_minimal(paths->central->entry, true, paths->vars, paths->uuids);
     interface_central_init(paths->central->menu);
 
     // Load BLE services JSON 
@@ -345,7 +345,7 @@ esp_err_t ble_central_load_services_and_connect(const char *device_id) {
 
     if (central_ctx != NULL) {
         ESP_LOGI(TAG, "Successfully parsed BLE services for connection");
-        lua_init_persistent_minimal(paths->central->entry, true);
+        lua_init_persistent_minimal(paths->central->entry, true, paths->vars, paths->uuids);
         interface_central_init(paths->central->menu);
         ble_central_start_scanning();
         device_paths_free(paths);

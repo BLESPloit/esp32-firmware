@@ -326,15 +326,21 @@ static void lua_task(void* arg) {
 // ── Persistent variables ────────────────────────────────────────────────── 
 
 void lua_vars_inject(const char *vars_path) {
-    if (!vars_path || vars_path[0] == '\0') return;
-
     lua_State *L = lua_get_state();
     if (!L) return;
+
+    lua_newtable(L);
+
+    if (!vars_path || vars_path[0] == '\0') {
+        lua_setglobal(L, "vars");
+        return;
+    }
 
     size_t sz;
     char *buf = read_json_file(vars_path, &sz);
     if (!buf) {
         ESP_LOGW(TAG, "vars json not found: %s", vars_path);
+        lua_setglobal(L, "vars");
         return;
     }
 
@@ -342,10 +348,10 @@ void lua_vars_inject(const char *vars_path) {
     free(buf);
     if (!root) {
         ESP_LOGE(TAG, "vars json parse error");
+        lua_setglobal(L, "vars");
         return;
     }
 
-    lua_newtable(L);
     cJSON *item = NULL;
     cJSON_ArrayForEach(item, root) {
         if (!item->string) continue;
@@ -402,12 +408,21 @@ static int lua_vars_save(lua_State *L) {
 
 
 void lua_uuids_inject(const char *path) {
-    if (!path || !path[0]) return;
+    lua_State *L = lua_get_state();
+    if (!L) return;
+
+    lua_newtable(L);
+
+    if (!path || !path[0]) {
+        lua_setglobal(L, "uuids");
+        return;
+    }
 
     size_t filesize;
     char *json_buf = read_json_file(path, &filesize);
     if (!json_buf) {
         ESP_LOGW(TAG, "lua_uuids_inject: cannot read %s", path);
+        lua_setglobal(L, "uuids");
         return;
     }
 
@@ -415,22 +430,20 @@ void lua_uuids_inject(const char *path) {
     free(json_buf);
     if (!root) {
         ESP_LOGE(TAG, "lua_uuids_inject: JSON parse error");
+        lua_setglobal(L, "uuids");
         return;
     }
-
-    // Create global table "uuids"
-    lua_newtable(g_lua_state);
 
     cJSON *entry = NULL;
     cJSON_ArrayForEach(entry, root) {
         if (!entry->string) continue;                      // key = symbol name
         cJSON *uuid_val = cJSON_GetObjectItem(entry, "uuid");
         if (!cJSON_IsString(uuid_val)) continue;
-        lua_pushstring(g_lua_state, uuid_val->valuestring);
-        lua_setfield(g_lua_state, -2, entry->string);      // uuids[key] = uuid
+        lua_pushstring(L, uuid_val->valuestring);
+        lua_setfield(L, -2, entry->string);                // uuids[key] = uuid
     }
 
-    lua_setglobal(g_lua_state, "uuids");                   // _G.uuids = table
+    lua_setglobal(L, "uuids");
     cJSON_Delete(root);
     ESP_LOGI(TAG, "lua_uuids_inject: loaded %s", path);
 }
@@ -439,7 +452,8 @@ void lua_uuids_inject(const char *path) {
 
 // ── Initialization ────────────────────────────────────────────────── 
 
-esp_err_t lua_init_persistent_minimal(const char *script_path, bool central) {
+esp_err_t lua_init_persistent_minimal(const char *script_path, bool central,
+                                      const char *vars_path, const char *uuids_path) {
     // Initialize cryptographic subsystem
     if (crypto_init() != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize crypto");
@@ -500,6 +514,11 @@ esp_err_t lua_init_persistent_minimal(const char *script_path, bool central) {
     lua_register(g_lua_state, "get_time", lua_get_time);
 
     lua_register(g_lua_state, "vars_save", lua_vars_save);
+
+    // Inject manifest globals before script top-level code runs.
+    lua_vars_set_path(vars_path ? vars_path : "");
+    lua_vars_inject(vars_path);
+    lua_uuids_inject(uuids_path);
 
     // Load and execute script
     if (luaL_loadfile(g_lua_state, script_path) != LUA_OK ||

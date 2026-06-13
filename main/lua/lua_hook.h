@@ -32,8 +32,11 @@ typedef struct {
 bool lua_is_task_running(void);
 lua_State *lua_get_state(void);
 
-// Initialize Lua with minimal libraries and dedicated task
-esp_err_t lua_init_persistent_minimal(const char *script_path, bool central);
+// Initialize Lua with minimal libraries and dedicated task.
+// vars_path: device manifest vars.json (NULL if none).
+// uuids_path: manifest uuids.json (NULL if none).
+esp_err_t lua_init_persistent_minimal(const char *script_path, bool central,
+                                      const char *vars_path, const char *uuids_path);
 
 // Asynchronous call (non-blocking, for handlers like on_startup, on_action)
 esp_err_t lua_call_handler_async(const char *func_name, const char *param);
