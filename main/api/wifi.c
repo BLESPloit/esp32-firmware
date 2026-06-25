@@ -112,6 +112,13 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
         ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
         ESP_LOGI(TAG, "Connected! IP: " IPSTR, IP2STR(&event->ip_info.ip));
 
+        esp_err_t ps_err = esp_wifi_set_ps(WIFI_PS_NONE);
+        if (ps_err != ESP_OK) {
+            ESP_LOGW(TAG, "esp_wifi_set_ps(WIFI_PS_NONE) failed: %s", esp_err_to_name(ps_err));
+        } else {
+            ESP_LOGI(TAG, "WiFi power save disabled");
+        }
+
         char ip_str[64];
         snprintf(ip_str, sizeof(ip_str), "IP: " IPSTR, IP2STR(&event->ip_info.ip));
         disp_show_temp_label(ip_str, 10000);
