@@ -66,7 +66,7 @@ static char *relay_mbuf_to_hex(struct os_mbuf *om) {
 }
 
 // BLE_UUID_TYPE_32 from ble_uuid_from_str for inputs like "00001800" (len > 6) holds a 16-bit
-// assigned UUID in the numeric value; coerce so ble_uuid_cmp matches ATT discovery (TYPE_16).
+// assigned UUID in the numeric value; coerce so relay UUID matching works with ATT discovery.
 static void relay_normalize_uuid(ble_uuid_any_t *uuid) {
     if (uuid->u.type != BLE_UUID_TYPE_32 || uuid->u32.value > 0xFFFF) {
         return;
@@ -74,6 +74,61 @@ static void relay_normalize_uuid(ble_uuid_any_t *uuid) {
     uint16_t v = (uint16_t)uuid->u32.value;
     uuid->u16.u.type = BLE_UUID_TYPE_16;
     uuid->u16.value = v;
+}
+
+// Bluetooth SIG base UUID prefix (little-endian wire order, same as NimBLE ble_uuid_base).
+static const uint8_t relay_uuid_sig_base[12] = {
+    0xfb, 0x34, 0x9b, 0x5f, 0x80, 0x00, 0x00, 0x80,
+    0x00, 0x10, 0x00, 0x00,
+};
+
+static bool relay_is_sig_prefix(const uint8_t flat[16]) {
+    return memcmp(flat, relay_uuid_sig_base, 12) == 0;
+}
+
+static uint16_t relay_sig_short(const uint8_t flat[16]) {
+    if (!relay_is_sig_prefix(flat)) {
+        return 0;
+    }
+    return (uint16_t)(flat[12] | (flat[13] << 8));
+}
+
+// Expand any UUID to 128-bit wire form so TYPE_16/32/128 compare equal when semantically equal.
+static bool relay_uuid_flat128(const ble_uuid_t *uuid, uint8_t out[16]) {
+    switch (uuid->type) {
+    case BLE_UUID_TYPE_128:
+        memcpy(out, BLE_UUID128(uuid)->value, 16);
+        return true;
+    case BLE_UUID_TYPE_32:
+        memcpy(out, relay_uuid_sig_base, 12);
+        out[12] = (uint8_t)(BLE_UUID32(uuid)->value & 0xff);
+        out[13] = (uint8_t)((BLE_UUID32(uuid)->value >> 8) & 0xff);
+        out[14] = (uint8_t)((BLE_UUID32(uuid)->value >> 16) & 0xff);
+        out[15] = (uint8_t)((BLE_UUID32(uuid)->value >> 24) & 0xff);
+        return true;
+    case BLE_UUID_TYPE_16:
+        memcpy(out, relay_uuid_sig_base, 12);
+        out[12] = (uint8_t)(BLE_UUID16(uuid)->value & 0xff);
+        out[13] = (uint8_t)(BLE_UUID16(uuid)->value >> 8);
+        out[14] = 0;
+        out[15] = 0;
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool relay_uuid_equal(const ble_uuid_t *a, const ble_uuid_t *b) {
+    uint8_t flat_a[16], flat_b[16];
+    if (!relay_uuid_flat128(a, flat_a) || !relay_uuid_flat128(b, flat_b)) {
+        return false;
+    }
+    if (memcmp(flat_a, flat_b, 16) == 0) {
+        return true;
+    }
+    uint16_t short_a = relay_sig_short(flat_a);
+    uint16_t short_b = relay_sig_short(flat_b);
+    return short_a != 0 && short_a == short_b;
 }
 
 // Parse svc/chr UUID for relay lookup: NimBLE string rules + SIG UUID collapse,
@@ -112,10 +167,10 @@ static uint16_t relay_find_char_handle(const char *svc_str, const char *chr_str)
 
     stored_service_t *svc = central_ctx->services;
     while (svc) {
-        if (ble_uuid_cmp(&svc->uuid.u, &svc_u.u) == 0) {
+        if (relay_uuid_equal(&svc->uuid.u, &svc_u.u)) {
             stored_characteristic_t *chr = svc->characteristics;
             while (chr) {
-                if (ble_uuid_cmp(&chr->uuid.u, &chr_u.u) == 0) {
+                if (relay_uuid_equal(&chr->uuid.u, &chr_u.u)) {
                     return chr->val_handle;
                 }
                 chr = chr->next;
@@ -141,13 +196,13 @@ static uint16_t relay_find_desc_handle(const char *svc_str, const char *chr_str,
 
     stored_service_t *svc = central_ctx->services;
     while (svc) {
-        if (ble_uuid_cmp(&svc->uuid.u, &svc_u.u) == 0) {
+        if (relay_uuid_equal(&svc->uuid.u, &svc_u.u)) {
             stored_characteristic_t *chr = svc->characteristics;
             while (chr) {
-                if (ble_uuid_cmp(&chr->uuid.u, &chr_u.u) == 0) {
+                if (relay_uuid_equal(&chr->uuid.u, &chr_u.u)) {
                     stored_descriptor_t *desc = chr->descriptors;
                     while (desc) {
-                        if (ble_uuid_cmp(&desc->uuid.u, &desc_u.u) == 0) {
+                        if (relay_uuid_equal(&desc->uuid.u, &desc_u.u)) {
                             return desc->handle;
                         }
                         desc = desc->next;
