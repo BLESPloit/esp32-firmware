@@ -348,7 +348,9 @@ void graphics_cleanup(void) {
     for (int i = 0; i < g_manager->element_count; i++) {
         gfx_element_t *e = &g_manager->elements[i];
         if (e->pending_render_timer) {
+#if !CONFIG_BLESPLOIT_BOARD_BARE
             lv_timer_del(e->pending_render_timer);
+#endif
             e->pending_render_timer = NULL;
         }
         if (e->svg_buf) { heap_caps_free(e->svg_buf); e->svg_buf = NULL; }
@@ -467,9 +469,9 @@ void gfx_render_png(const char *id)
         ESP_LOGW(TAG, "PNG '%s' not preloaded, skipping LVGL render", id);
     }
 
-    // WebSocket render works from the static file path — no buffer needed 
+    // WebSocket render: device-relative asset path (browser adds /static/, mobile uses fs read)
     char ws_path[MAX_DEVICE_PATH_LEN];
-    snprintf(ws_path, sizeof(ws_path), "/static/%s/%s",
+    snprintf(ws_path, sizeof(ws_path), "%s/%s",
              current_simulated_device, e->data);
     websocket_render_png(id, ws_path, c);
 
@@ -504,7 +506,7 @@ void gfx_render_svg(const char *id)
     e->lvgl_obj = disp_render_svg(lvgl_path, id, px, py, sz_px, 0, e->color_provided, e->color);
 
     char ws_path[MAX_DEVICE_PATH_LEN];
-    snprintf(ws_path, sizeof(ws_path), "/static/%s/%s",
+    snprintf(ws_path, sizeof(ws_path), "%s/%s",
              current_simulated_device, e->data);
     
     websocket_render_svg(id, ws_path, c, e->color_provided, e->color);
@@ -537,6 +539,11 @@ void gfx_set_element_color(const char *id, uint32_t color)
     if (e->type == ELEM_SVG) {
         ESP_LOGI(TAG, "SVG %s update color (debounced)", id);
 
+#if CONFIG_BLESPLOIT_BOARD_BARE
+        gfx_render_svg(id);
+        websocket_set_element_color(id, color);
+        return;
+#else
         if (e->pending_render_timer) {
             // Reset the countdown — a newer color arrived
             lv_timer_reset(e->pending_render_timer);
@@ -547,6 +554,7 @@ void gfx_set_element_color(const char *id, uint32_t color)
             lv_timer_set_repeat_count(e->pending_render_timer, 1);
         }
         return;   // actual render deferred
+#endif
 
     } else if (e->type == ELEM_TEXT) {
         lv_obj_t *old_obj = e->lvgl_obj;

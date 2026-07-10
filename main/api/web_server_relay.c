@@ -311,11 +311,43 @@ static esp_err_t ws_relay_connect_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+static void relay_ws_send_response(const char *action, const char *status, const cJSON *request)
+{
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddStringToObject(resp, "type", "relay_response");
+    cJSON_AddStringToObject(resp, "action", action);
+    cJSON_AddStringToObject(resp, "status", status);
+    ws_json_echo_req_id(resp, request);
+    char *str = cJSON_PrintUnformatted(resp);
+    cJSON_Delete(resp);
+    if (str) {
+        websocket_broadcast_json_transient(str);
+        free(str);
+    }
+}
+
 static bool relay_ws_handler(const char *type, cJSON *json) {
     if (strcmp(type, "relay") != 0) return false;
 
     cJSON *act = cJSON_GetObjectItemCaseSensitive(json, "action");
     const char *action = cJSON_IsString(act) ? act->valuestring : NULL;
+
+    if (action && strcmp(action, "connect") == 0) {
+        cJSON *target = cJSON_GetObjectItemCaseSensitive(json, "target");
+        if (!cJSON_IsString(target)) {
+            relay_ws_send_response("connect", "failed", json);
+            return true;
+        }
+        esp_err_t rc = ws_relay_client_connect(target->valuestring);
+        relay_ws_send_response("connect", rc == ESP_OK ? "connected" : "failed", json);
+        return true;
+    }
+
+    if (action && strcmp(action, "disconnect") == 0) {
+        ws_relay_client_disconnect();
+        relay_ws_send_response("disconnect", "disconnected", json);
+        return true;
+    }
 
     // Incoming responses from a central
     if (action && (

@@ -45,6 +45,11 @@ device_config_t config = {
             .value.u8 = WIFI_MODE_PREF_STA_FIRST,
             .type = CONFIG_TYPE_UINT8,
             .nvs_name = "wifimode"
+        },
+        .usb_jtag_console = {
+            .value.u8 = false,
+            .type = CONFIG_TYPE_BOOL,
+            .nvs_name = "usbjtag"
         }
     };
 
@@ -298,6 +303,8 @@ esp_err_t write_config_nvs(void)
     if (err != ESP_OK) goto error;
     err = save_param_to_nvs(handle, &config.wifi_mode_pref, false);
     if (err != ESP_OK) goto error;
+    err = save_param_to_nvs(handle, &config.usb_jtag_console, false);
+    if (err != ESP_OK) goto error;
 
     // Commit written value.
     // After setting any values, nvs_commit() must be called to ensure changes are written to flash storage. 
@@ -435,6 +442,15 @@ esp_err_t read_config_nvs(void)
         ESP_LOGW(TAG, "Invalid wifi mode %u, resetting to STA-first", config.wifi_mode_pref.value.u8);
         config.wifi_mode_pref.value.u8 = WIFI_MODE_PREF_STA_FIRST;
         err = save_param_to_nvs(handle, &config.wifi_mode_pref, false);
+        if (err != ESP_OK)
+            return err;
+        write_commit_needed = true;
+    }
+
+    err = load_param_from_nvs(handle, &config.usb_jtag_console);
+    if (err != ESP_OK) {
+        config.usb_jtag_console.value.u8 = false;
+        err = save_param_to_nvs(handle, &config.usb_jtag_console, false);
         if (err != ESP_OK)
             return err;
         write_commit_needed = true;

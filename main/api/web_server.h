@@ -13,6 +13,7 @@
 
 
 esp_err_t start_web_server(void);
+bool web_server_is_running(void);
 void init_simulation_state(void);
 
 

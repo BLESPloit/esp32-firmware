@@ -11,17 +11,70 @@
 #include "linenoise/linenoise.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
-#include "driver/usb_serial_jtag.h"
-#include "driver/usb_serial_jtag_vfs.h"
 #include <fcntl.h>
 
 #include "ble/ble_bond.h"
 #include "api/console.h"
 #include "api/wifi.h"
+#include "api/usb_net.h"
 #include "common/storage.h"
 #include "common/utils.h"
 
+#if CONFIG_USJ_ENABLE_USB_SERIAL_JTAG
+#include "driver/usb_serial_jtag.h"
+#include "driver/usb_serial_jtag_vfs.h"
+#endif
+
+#if CONFIG_TINYUSB_CDC_ENABLED
+#include "tusb_console.h"
+#include "tusb_cdc_acm.h"
+#endif
+
+static void console_repl_task(void *arg)
+{
+    esp_console_repl_config_t *cfg = (esp_console_repl_config_t *)arg;
+    char prompt_buf[48];
+
+    /* idf.py monitor is not a full VT100 terminal. Smart linenoise emits CSI sequences on
+     * stdout; some USB CDC stacks feed them back into RX, which then get executed as commands. */
+    linenoiseSetDumbMode(1);
+    linenoiseSetMultiLine(0);
+    snprintf(prompt_buf, sizeof(prompt_buf), "%s ", cfg->prompt);
+
+    linenoiseSetMaxLineLen(cfg->max_cmdline_length);
+    printf("\r\nType 'help' to get the list of commands.\r\n");
+
+    while (true) {
+        char *line = linenoise(prompt_buf);
+        if (line == NULL || line[0] == '\0') {
+            if (line != NULL) {
+                linenoiseFree(line);
+            }
+            continue;
+        }
+        linenoiseHistoryAdd(line);
+        int ret;
+        esp_err_t err = esp_console_run(line, &ret);
+        if (err == ESP_ERR_NOT_FOUND) {
+            printf("Unrecognized command\n");
+        } else if (err == ESP_OK && ret != ESP_OK) {
+            printf("Command returned non-zero error code: 0x%x (%s)\n", ret, esp_err_to_name(ret));
+        } else if (err != ESP_OK && err != ESP_ERR_INVALID_ARG) {
+            printf("Internal error: %s\n", esp_err_to_name(err));
+        }
+        linenoiseFree(line);
+    }
+}
+
 static const char *TAG = "console";
+
+static void start_console_repl_task(esp_console_repl_config_t *repl_config)
+{
+    if (xTaskCreate(console_repl_task, "console_repl", repl_config->task_stack_size,
+                    repl_config, repl_config->task_priority, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "Failed to start console REPL task");
+    }
+}
 
 extern device_config_t config;
 
@@ -44,7 +97,13 @@ static struct {
 } wifi_args;
 
 
+static struct {
+    struct arg_str *mode;
+    struct arg_end *end;
+} usb_console_args;
+
 esp_console_cmd_t free_cmd, reboot_cmd, reset_cmd, bond_cmd, wifi_cmd, version_cmd;
+esp_console_cmd_t usb_console_cmd;
 
 // The esp_console_register_help_command() registers global help for all commands.
 // We need extra function for a single command help.
@@ -107,9 +166,55 @@ static int set_free(int argc, char **argv)
 
 static int set_reboot(int argc, char **argv)
 {
+    (void)argc;
+    (void)argv;
     esp_restart();
     return ESP_OK;
 }
+
+#if CONFIG_TINYUSB_NET_MODE_NCM
+static int set_usb_console(int argc, char **argv)
+{
+    if (argc == 1) {
+        printf("USB console: %s\n",
+               config.usb_jtag_console.value.u8 ? "jtag (USB Serial/JTAG)" : "tinyusb (CDC + NCM)");
+        help_command(&usb_console_cmd);
+        return ESP_OK;
+    }
+
+    int nerrors = arg_parse(argc, argv, (void **)&usb_console_args);
+    if (nerrors != 0) {
+        arg_print_errors(stderr, usb_console_args.end, argv[0]);
+        return ESP_FAIL;
+    }
+
+    const char *mode = usb_console_args.mode->sval[0];
+    bool want_jtag = false;
+    if (strcmp(mode, "jtag") == 0) {
+        want_jtag = true;
+    } else if (strcmp(mode, "tinyusb") == 0) {
+        want_jtag = false;
+    } else {
+        printf("Unknown mode: %s (use: jtag, tinyusb)\n", mode);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (config.usb_jtag_console.value.u8 == want_jtag) {
+        printf("Already in %s mode\n", mode);
+        return ESP_OK;
+    }
+
+    config.usb_jtag_console.value.u8 = want_jtag;
+    if (write_config_nvs() != ESP_OK) {
+        printf("Failed to save NVS\n");
+        return ESP_FAIL;
+    }
+
+    printf("USB console set to %s — rebooting...\n", mode);
+    esp_restart();
+    return ESP_OK;
+}
+#endif
 
 static int set_reset(int argc, char **argv)
 {
@@ -146,6 +251,7 @@ static int set_wifi(int argc, char **argv)
     bool write_nvs = false;
     size_t len = 0;
     char ip_str[32];
+    char usb_ip_str[32];
 
 
     if (argc==1) { //no parameters
@@ -155,8 +261,10 @@ static int set_wifi(int argc, char **argv)
         char eff_ap[48];
         wifi_get_ap_ssid_effective(eff_ap, sizeof(eff_ap));
         wifi_get_current_ip(ip_str, sizeof(ip_str));
-        printf(" Networking: %s\n", config.net_enabled.value.u8 ? "enabled" : "disabled");
-        printf(" Current IP:               %s\n", ip_str);
+        usb_net_get_ip(usb_ip_str, sizeof(usb_ip_str));
+        printf(" WiFi: %s\n", config.net_enabled.value.u8 ? "enabled" : "disabled");
+        printf(" WiFi IP:                  %s\n", ip_str);
+        printf(" USB IP:                   %s\n", usb_ip_str);
         printf(" Soft-AP SSID (effective): %s\n", eff_ap);
         printf(" Soft-AP SSID (custom NVS): %s\n",
                config.wifi_ap_ssid.value.str ? config.wifi_ap_ssid.value.str : "(none — MAC suffix default)");
@@ -178,11 +286,11 @@ static int set_wifi(int argc, char **argv)
     }
     if (wifi_args.off->count > 0) {
         config.net_enabled.value.u8 = 0;
-        ESP_LOGI(TAG, "Networking disabled");
+        ESP_LOGI(TAG, "WiFi disabled");
         write_nvs = true;
     } else if (wifi_args.on->count > 0) {
         config.net_enabled.value.u8 = 1;
-        ESP_LOGI(TAG, "Networking enabled (using existing credentials)");
+        ESP_LOGI(TAG, "WiFi enabled (using existing credentials)");
         write_nvs = true;
     }
     else {
@@ -278,7 +386,7 @@ static int set_wifi(int argc, char **argv)
             write_nvs = true;
         }
         if (write_nvs) {
-            config.net_enabled.value.u8 = 1;  // Credentials = enabled
+            config.net_enabled.value.u8 = 1;  // Credentials = WiFi enabled
         }
 
     }
@@ -334,13 +442,28 @@ void register_reboot(void)
     reboot_cmd.argtable = NULL;
 
     ESP_ERROR_CHECK( esp_console_cmd_register(&reboot_cmd) );
-
 }
+
+#if CONFIG_TINYUSB_NET_MODE_NCM
+void register_usb_console(void)
+{
+    usb_console_args.mode = arg_str1(NULL, NULL, "<jtag|tinyusb>", "USB console mode");
+    usb_console_args.end = arg_end(2);
+
+    usb_console_cmd.command = "usb-console";
+    usb_console_cmd.help = "Switch USB console: jtag = Serial/JTAG (idf.py flash, full logs in monitor), tinyusb = CDC + NCM (USB ethernet)";
+    usb_console_cmd.hint = "<jtag|tinyusb>";
+    usb_console_cmd.func = &set_usb_console;
+    usb_console_cmd.argtable = &usb_console_args;
+
+    ESP_ERROR_CHECK(esp_console_cmd_register(&usb_console_cmd));
+}
+#endif
 
 void register_reset(void)
 {
     reset_cmd.command = "reset";
-    reset_cmd.help = "Reset the device settings to factory default (erase NVS storage). Note: for badge log files use 'log' command.";
+    reset_cmd.help = "Reset the device settings to factory default (erase NVS storage).";
     reset_cmd.hint = NULL;
     reset_cmd.func = &set_reset;
     reset_cmd.argtable = NULL;
@@ -366,8 +489,8 @@ void register_wifi(void)
     wifi_args.ap_ssid = arg_str0("a", "ap-ssid", "<ssid>", "Soft-AP SSID (omit value or \"\" clears → MAC default)");
     wifi_args.ap_psk = arg_str0("q", "ap-psk", "<psk>", "Soft-AP WPA2 password (empty clears → firmware default)");
     wifi_args.mode = arg_str0("M", "mode", "<sta|ap>", "sta = STA-first + AP fallback, ap = AP-only");
-    wifi_args.off  = arg_lit0("f", "off",   "Disable networking");
-    wifi_args.on   = arg_lit0("e", "on",    "Enable networking (uses existing credentials)");
+    wifi_args.off  = arg_lit0("f", "off",   "Disable WiFi (USB Ethernet stays up)");
+    wifi_args.on   = arg_lit0("e", "on",    "Enable WiFi (uses existing credentials)");
     wifi_args.end = arg_end(20);
 
     wifi_cmd.command = "wifi";
@@ -384,49 +507,71 @@ void register_wifi(void)
         ESP_LOGE(TAG, "Register cmd 'wifi': insufficient memory");
     }
 }
-
 void initialize_console(void)
 {
-    esp_console_repl_t *repl = NULL;
-
     esp_console_repl_config_t repl_config = ESP_CONSOLE_REPL_CONFIG_DEFAULT();
-    // Prompt to be printed before each line
     repl_config.prompt = "BLESPlo.it >";
     repl_config.max_cmdline_length = 1024;
 
     linenoiseSetCompletionCallback(&esp_console_get_completion);
     linenoiseSetHintsCallback((linenoiseHintsCallback*) &esp_console_get_hint);
 
-    // help() command that prints syntax for all commands
     esp_console_register_help_command();
 
     register_bond();
     register_free();
     register_reboot();
+#if CONFIG_TINYUSB_NET_MODE_NCM
+    register_usb_console();
+#endif
     register_reset();
     register_version();
     register_wifi();
- 
-    // web proxy
     register_file_commands();
     register_ws_proxy();
 
-#if defined(CONFIG_ESP_CONSOLE_UART_DEFAULT) || defined(CONFIG_ESP_CONSOLE_UART_CUSTOM)
-    esp_console_dev_uart_config_t hw_config = ESP_CONSOLE_DEV_UART_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_console_new_repl_uart(&hw_config, &repl_config, &repl));
+#if CONFIG_TINYUSB_NET_MODE_NCM
+    if (config.usb_jtag_console.value.u8) {
+#if CONFIG_USJ_ENABLE_USB_SERIAL_JTAG
+        usb_serial_jtag_vfs_set_rx_line_endings(ESP_LINE_ENDINGS_CR);
+        usb_serial_jtag_vfs_set_tx_line_endings(ESP_LINE_ENDINGS_CRLF);
 
-#elif defined(CONFIG_ESP_CONSOLE_USB_CDC)
-    esp_console_dev_usb_cdc_config_t hw_config = ESP_CONSOLE_DEV_CDC_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_console_new_repl_usb_cdc(&hw_config, &repl_config, &repl));
+        usb_serial_jtag_driver_config_t usj_config = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
+        ESP_ERROR_CHECK(usb_serial_jtag_driver_install(&usj_config));
 
-#elif defined(CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG)
-    esp_console_dev_usb_serial_jtag_config_t hw_config = ESP_CONSOLE_DEV_USB_SERIAL_JTAG_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_console_new_repl_usb_serial_jtag(&hw_config, &repl_config, &repl));    
+        esp_console_config_t console_config = ESP_CONSOLE_CONFIG_DEFAULT();
+        console_config.max_cmdline_length = repl_config.max_cmdline_length;
+        ESP_ERROR_CHECK(esp_console_init(&console_config));
+        usb_serial_jtag_vfs_use_driver();
 
+        fcntl(fileno(stdout), F_SETFL, 0);
+        fcntl(fileno(stdin), F_SETFL, 0);
+        setvbuf(stdin, NULL, _IONBF, 0);
+
+        start_console_repl_task(&repl_config);
+        ESP_LOGI(TAG, "Console on USB Serial/JTAG (NVS usbjtag=1)");
+#else
+        ESP_LOGE(TAG, "usbjtag=1 but CONFIG_USJ_ENABLE_USB_SERIAL_JTAG is disabled");
+#endif
+        return;
+    }
+#endif
+
+#if CONFIG_TINYUSB_CDC_ENABLED
+    {
+        esp_console_config_t console_config = ESP_CONSOLE_CONFIG_DEFAULT();
+        console_config.max_cmdline_length = repl_config.max_cmdline_length;
+        ESP_ERROR_CHECK(esp_console_init(&console_config));
+        ESP_ERROR_CHECK(esp_tusb_init_console(TINYUSB_CDC_ACM_0));
+
+        fcntl(fileno(stdout), F_SETFL, 0);
+        fcntl(fileno(stdin), F_SETFL, 0);
+        setvbuf(stdin, NULL, _IONBF, 0);
+
+        start_console_repl_task(&repl_config);
+        ESP_LOGI(TAG, "Console on TinyUSB CDC-ACM");
+    }
 #else
 #error Unsupported console type
 #endif
-
-    ESP_ERROR_CHECK(esp_console_start_repl(repl));
-
 }

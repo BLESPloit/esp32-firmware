@@ -48,8 +48,17 @@ esp_err_t httpd_index_page(httpd_req_t *req) {
 
 // ── HTTPD start ────────────────────────────────────────────────── 
 
+bool web_server_is_running(void)
+{
+    return server != NULL;
+}
+
 esp_err_t start_web_server(void)
 {
+    if (server != NULL) {
+        return ESP_OK;
+    }
+
     int rc;
     static int handler_count = 0;
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();

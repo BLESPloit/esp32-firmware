@@ -17,6 +17,7 @@
 #include "common/storage.h"
 #include "api/web_server.h"
 #include "api/web_server_internal.h"
+#include "api/wifi.h"
 
 static const char *TAG = "web server websocket";
 
@@ -33,7 +34,7 @@ static SemaphoreHandle_t ws_send_mutex = NULL;
 // Maintain state for websocket
 typedef struct {
     char id[24];
-    char json[180];
+    char json[256];
     bool active;
 } element_state_t;  
 
@@ -77,6 +78,17 @@ void ws_register_message_handler(ws_message_handler_fn_t fn) {
         g_msg_handlers[g_msg_handler_count++] = fn;
     else
         ESP_LOGW(TAG, "WS handler table full, dropping handler");
+}
+
+void ws_json_echo_req_id(cJSON *response, const cJSON *request)
+{
+    if (!response || !request) return;
+    cJSON *rid = cJSON_GetObjectItemCaseSensitive(request, "req_id");
+    if (cJSON_IsNumber(rid)) {
+        cJSON_AddNumberToObject(response, "req_id", cJSON_GetNumberValue(rid));
+    } else if (cJSON_IsString(rid)) {
+        cJSON_AddStringToObject(response, "req_id", rid->valuestring);
+    }
 }
 
 
@@ -206,6 +218,16 @@ static void send_device_status(int fd) {
     free(s);
 }
 
+static void send_wifi_status(int fd) {
+    char *s = wifi_status_message_new();
+    if (!s) return;
+    httpd_ws_frame_t pkt = {.payload=(uint8_t*)s, .len=strlen(s), .type=HTTPD_WS_TYPE_TEXT};
+    if (ws_send_frame_locked(fd, &pkt) != ESP_OK) {
+        ws_evict_client(fd);
+    }
+    free(s);
+}
+
 static void send_device_status_broadcast(void) {
     char *s = build_device_status_json();
     if (!s) return;
@@ -290,6 +312,7 @@ static void ws_on_connect_cb(void *arg)
     smart_state_replay(fd);
     send_hello(fd);
     send_device_status(fd);
+    send_wifi_status(fd);
 }
 
 // Injects "src" into a JSON string. Returns heap-allocated string, caller must free.
@@ -532,12 +555,6 @@ static esp_err_t ws_broadcast_with_state(const char *message, bool save_to_state
 
     char *stamped = inject_src ? ws_inject_src(message) : NULL;
     const char *to_send = stamped ? stamped : message;
-
-    if (!config.net_enabled.value.u8) {
-        printf("[WS-OUT]%s\n", to_send);
-        free(stamped);
-        return ESP_OK;
-    }
 
     if (!server || !ws_clients_mutex) {
         ESP_LOGE(TAG, "Can't broadcast ws!");

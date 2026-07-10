@@ -25,6 +25,7 @@
 #include "common/utils.h"
 #include "api/web_server.h"
 #include "api/wifi.h"
+#include "api/usb_net.h"
 
 static const char *TAG = "main";
 
@@ -68,17 +69,20 @@ void app_main(void)
    // Create default event loop (must be before http server)
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
+    ESP_ERROR_CHECK(esp_netif_init());
+
+    // WiFi before TinyUSB: esp_wifi_init() hangs if USB OTG stack is up first 
+    if (config.net_enabled.value.u8) {
+        wifi_init_with_fallback();
+    }
+
+    if (!config.usb_jtag_console.value.u8) {
+        ESP_ERROR_CHECK(usb_net_init());
+    }
     initialize_console();
 
     // initialize BLE scanning device mutex 
     ble_scanner_init();
-
-    if (config.net_enabled.value.u8) {
-        // Initialize TCP/IP stack 
-        ESP_ERROR_CHECK(esp_netif_init());
-
-        wifi_init_with_fallback();
-    }
 
     log_memory_usage("main end");
 

@@ -278,7 +278,7 @@ function drawPNG(id, path, align, x, y, w, h) {
     const img   = new Image();
     img.onload  = () => { imageCache[path] = img; perform(); addEspLog('I', 'canvas', `PNG loaded: ${path}`); };
     img.onerror = () => addEspLog('E', 'canvas', `Failed to load PNG: ${path}`);
-    img.src = path;
+    img.src = path.startsWith('/static/') ? path : '/static/' + path;
   }
 }
 
@@ -299,7 +299,8 @@ function drawSvg(id, svgPath, align, x, y, w, color = null) {
   };
   if (svgCache[svgPath]) perform();
   else {
-    fetch(svgPath)
+    const svgUrl = svgPath.startsWith('/static/') ? svgPath : '/static/' + svgPath;
+    fetch(svgUrl)
       .then(r => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.text();
