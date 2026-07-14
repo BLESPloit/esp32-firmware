@@ -5,14 +5,15 @@
 #include "esp_log.h"
 #include "esp_check.h"
 #include "esp_netif.h"
+#include "dhcpserver/dhcpserver.h"
 #include "dhcpserver/dhcpserver_options.h"
 #include "lwip/esp_netif_net_stack.h"
 #include "tinyusb.h"
-#include "tusb_cdc_acm.h"
+#include "tinyusb_default_config.h"
+#include "tinyusb_cdc_acm.h"
 #include "tinyusb_net.h"
 #include "common/utils.h"
 #include "api/usb_net.h"
-#include "api/wifi.h"
 #include "api/web_server.h"
 
 #if CONFIG_TINYUSB_NET_MODE_NCM
@@ -30,7 +31,7 @@ static bool s_ncm_link_up = false;
 
 static const esp_netif_ip_info_t s_usb_ip_info = {
     .ip = { .addr = ESP_IP4TOADDR(192, 168, 5, 1) },
-    .gw = { .addr = ESP_IP4TOADDR(192, 168, 5, 1) },
+    .gw = { .addr = 0 },
     .netmask = { .addr = ESP_IP4TOADDR(255, 255, 255, 0) },
 };
 
@@ -106,22 +107,38 @@ static void usb_set_ncm_link(bool up)
     }
 }
 
-static void usb_on_host_attached(void)
+static esp_err_t usb_dhcps_configure_local_only(esp_netif_t *netif)
 {
-    usb_set_ncm_link(true);
-    start_web_server();
-    wifi_broadcast_status();
-}
+    uint8_t offer_router = 0;
+    ESP_RETURN_ON_ERROR(
+        esp_netif_dhcps_option(netif, ESP_NETIF_OP_SET,
+                               ESP_NETIF_ROUTER_SOLICITATION_ADDRESS, &offer_router,
+                               sizeof(offer_router)),
+        TAG, "disable DHCP router offer");
 
-void tud_mount_cb(void)
-{
-    usb_on_host_attached();
-}
+    uint8_t offer_dns = 0;
+    ESP_RETURN_ON_ERROR(
+        esp_netif_dhcps_option(netif, ESP_NETIF_OP_SET, ESP_NETIF_DOMAIN_NAME_SERVER,
+                               &offer_dns, sizeof(offer_dns)),
+        TAG, "disable DHCP DNS offer");
 
-void tud_umount_cb(void)
-{
-    usb_set_ncm_link(false);
-    wifi_broadcast_status();
+    uint32_t lease_minutes = 60;
+    ESP_RETURN_ON_ERROR(
+        esp_netif_dhcps_option(netif, ESP_NETIF_OP_SET, IP_ADDRESS_LEASE_TIME,
+                               &lease_minutes, sizeof(lease_minutes)),
+        TAG, "lease time");
+
+    dhcps_lease_t pool = {
+        .enable = true,
+        .start_ip = { .addr = ESP_IP4TOADDR(192, 168, 5, 2) },
+        .end_ip = { .addr = ESP_IP4TOADDR(192, 168, 5, 8) },
+    };
+    ESP_RETURN_ON_ERROR(
+        esp_netif_dhcps_option(netif, ESP_NETIF_OP_SET, REQUESTED_IP_ADDRESS, &pool,
+                               sizeof(pool)),
+        TAG, "lease pool");
+
+    return ESP_OK;
 }
 
 static esp_err_t usb_netif_create(void)
@@ -161,46 +178,86 @@ static esp_err_t usb_netif_create(void)
     uint8_t lwip_mac[6] = { 0x02, 0x02, 0x11, 0x22, 0x33, 0x02 };
     esp_netif_set_mac(s_usb_netif, lwip_mac);
 
-    uint32_t lease_minutes = 60;
-    esp_netif_dhcps_option(s_usb_netif, ESP_NETIF_OP_SET, IP_ADDRESS_LEASE_TIME,
-                           &lease_minutes, sizeof(lease_minutes));
+    ESP_RETURN_ON_ERROR(usb_dhcps_configure_local_only(s_usb_netif), TAG,
+                        "local-only DHCP config failed");
 
     esp_netif_action_start(s_usb_netif, 0, 0, 0);
+
+    ESP_LOGI(TAG, "USB DHCP: local-only (no router), pool 192.168.5.2-8");
 
     snprintf(s_usb_ip_str, sizeof(s_usb_ip_str), IPSTR, IP2STR(&s_usb_ip_info.ip));
     return ESP_OK;
 }
 
+static void usb_link_up_task(void *arg)
+{
+    for (int i = 0; i < 10 && !tud_mounted(); i++) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    usb_set_ncm_link(true);
+    vTaskDelete(NULL);
+}
+
+static void usb_event_callback(tinyusb_event_t *event, void *arg)
+{
+    switch (event->id) {
+    case TINYUSB_EVENT_ATTACHED:
+        ESP_LOGI(TAG, "USB attached (mounted)");
+        xTaskCreate(usb_link_up_task, "usb_link_up", 2048, NULL, 5, NULL);
+        break;
+    case TINYUSB_EVENT_DETACHED:
+        ESP_LOGI(TAG, "USB detached (unmounted)");
+        usb_set_ncm_link(false);
+        break;
+#ifdef CONFIG_TINYUSB_RESUME_CALLBACK
+    case TINYUSB_EVENT_RESUMED:
+        ESP_LOGI(TAG, "USB resumed");
+        usb_set_ncm_link(true);
+        break;
+#endif
+#ifdef CONFIG_TINYUSB_SUSPEND_CALLBACK
+    case TINYUSB_EVENT_SUSPENDED:
+        ESP_LOGI(TAG, "USB suspended by host");
+        break;
+#endif
+    default:
+        break;
+    }
+}
+
 esp_err_t usb_net_init(void)
 {
+    tinyusb_config_t tusb_cfg = TINYUSB_DEFAULT_CONFIG();
+    tusb_cfg.event_cb = usb_event_callback;
+    tusb_cfg.event_arg = NULL;
+
+    ESP_RETURN_ON_ERROR(tinyusb_driver_install(&tusb_cfg), TAG, "tinyusb_driver_install failed");
+
     ESP_LOGI(TAG, "Initializing TinyUSB composite (CDC-ACM + NCM)");
 #if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG
     ESP_LOGE(TAG, "sdkconfig conflict: CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG breaks TinyUSB NCM");
 #endif
 
-    const tinyusb_config_t tusb_cfg = {
-        .device_descriptor = NULL,
-        .string_descriptor = NULL,
-        .string_descriptor_count = 0,
-        .external_phy = false,
-        .configuration_descriptor = NULL,
-    };
-    ESP_RETURN_ON_ERROR(tinyusb_driver_install(&tusb_cfg), TAG, "tinyusb_driver_install failed");
-
     const tinyusb_config_cdcacm_t acm_cfg = {
-        .usb_dev = TINYUSB_USBDEV_0,
         .cdc_port = TINYUSB_CDC_ACM_0,
     };
-    ESP_RETURN_ON_ERROR(tusb_cdc_acm_init(&acm_cfg), TAG, "tusb_cdc_acm_init failed");
+    ESP_RETURN_ON_ERROR(tinyusb_cdcacm_init(&acm_cfg), TAG, "tinyusb_cdcacm_init failed");
 
     const tinyusb_net_config_t net_cfg = {
         .mac_addr = { 0x02, 0x02, 0x11, 0x22, 0x33, 0x01 },
         .on_recv_callback = usb_netif_recv,
         .on_init_callback = NULL,
     };
-    ESP_RETURN_ON_ERROR(tinyusb_net_init(TINYUSB_USBDEV_0, &net_cfg), TAG, "tinyusb_net_init failed");
+    ESP_RETURN_ON_ERROR(tinyusb_net_init(&net_cfg), TAG, "tinyusb_net_init failed");
 
     ESP_RETURN_ON_ERROR(usb_netif_create(), TAG, "USB esp-netif create failed");
+
+    // Make the web UI reachable over the USB-NCM link even when Wi-Fi is
+    // disabled. httpd listens on 0.0.0.0 and start_web_server() is idempotent,
+    // so this is a no-op if the Wi-Fi bring-up path already started it.
+    if (start_web_server() != ESP_OK) {
+        ESP_LOGW(TAG, "web server start (USB path) failed");
+    }
 
     usb_set_ncm_link(false);
     log_memory_usage("after usb_net_init");
