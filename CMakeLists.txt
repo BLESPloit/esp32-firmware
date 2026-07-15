@@ -5,7 +5,7 @@ cmake_minimum_required(VERSION 3.5)
 set(SDKCONFIG "${CMAKE_BINARY_DIR}/sdkconfig")
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-project(BLESPloit VERSION 1.1.0)
+project(BLESPloit VERSION 1.1.1)
 
 # force colored compilation output 
 add_compile_options (-fdiagnostics-color=always)
