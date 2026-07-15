@@ -4,7 +4,7 @@ Base URL: `http://<device-ip>/` (HTTP port is the ESP-IDF default unless changed
 When connected over **USB CDC-NCM**, the device is also reachable at **`http://192.168.5.1/`** (DHCP assigns the host `192.168.5.x`). WiFi AP/STA continues to work in parallel (`192.168.4.1` in AP mode, etc.).  
 All JSON bodies use `Content-Type: application/json` where applicable.
 
-**Console:** composite USB exposes **CDC-ACM** (serial REPL via TinyUSB) and **CDC-NCM** (Ethernet). Use the ACM serial port for `idf.py monitor` and the `wifi` command. iOS USB-C may enumerate NCM; Lightning iPhones typically do not.
+**Console:** composite USB exposes **CDC-ACM** (serial REPL) and **CDC-NCM** (Ethernet). See **[Serial console](#serial-console)** below. Use the ACM port for `idf.py monitor` and console commands (`wifi`, `version`, …).
 
 **Mobile clients** should use the **WebSocket API** for BLE control, file I/O, and **Wi‑Fi configuration** (`type`: `wifi`). REST JSON endpoints remain for **browser** compatibility (device editor, Wi‑Fi index page, file manager HTML). Device JSON on mobile is read/written via **`fs` whole-file transfer** (`read_start` / `write_start`). The browser Wi‑Fi modal uses **REST** `GET/POST /api/wifi`; serial **CDC-ACM** also accepts `wifi` console commands and `ws '{...}'` JSON injection.
 
@@ -117,6 +117,34 @@ Filtering applies before broadcast.
 
 ---
 
+## Serial console
+
+USB composite device: **CDC-ACM** (serial REPL) and **CDC-NCM** (USB Ethernet at `192.168.5.1`). iOS USB-C may enumerate NCM; Lightning iPhones typically do not.
+
+**USB NCM DHCP (local link only):** The ESP DHCP server on USB Ethernet assigns hosts **192.168.5.2–8** on **192.168.5.0/24** and does **not** advertise a default gateway (no DHCP option 3). Use this link to reach the device at `http://192.168.5.1/` while the host keeps **Wi‑Fi as the internet path** when both interfaces are up. DNS offering is disabled via ESP-IDF APIs; note that lwIP may still include DHCP option 6 pointing at `192.168.5.1` — removing option 6 entirely would require an lwIP patch.
+
+### USB console mode (NVS)
+
+| Mode | NVS `usbjtag` | Serial port | USB Ethernet |
+|------|---------------|-------------|--------------|
+| **TinyUSB** (default) | `0` | CDC-ACM (VID `303A`, PID `0x400x`) | CDC-NCM enabled |
+| **JTAG** | `1` | USB Serial/JTAG (VID `303A`, PID `0x1001`) | Disabled |
+
+Serial command **`usb-console jtag`** switches to USB Serial/JTAG at next boot; **`usb-console tinyusb`** restores TinyUSB CDC + NCM. **ROM download mode:** hold **BOOT** and press **RESET**.
+
+### Common commands
+
+| Command | Description |
+|---------|-------------|
+| `help` | List registered commands |
+| `version` | Firmware version, project name, build time, IDF version |
+| `wifi` | Show or set WiFi NVS settings (same fields as REST `/api/wifi`) |
+| `ws '<json>'` | Inject a WebSocket JSON message (see WebSocket section) |
+| `usb-console <jtag\|tinyusb>` | Switch USB console mode (reboot required) |
+| `reboot` | Restart firmware |
+
+---
+
 ## WebSocket
 
 **Endpoint:** `ws://<device-ip>/ws`  
@@ -170,15 +198,13 @@ Unhandled `type` values are logged and ignored.
 | `memory` | Broadcast transient `memory_status` (heap stats) | — |
 | `version` | Broadcast transient `version` (firmware / IDF / build time) | — |
 
-**Serial console (USB mode, not WebSocket):** `usb-console jtag` switches to USB Serial/JTAG console at next boot (NVS); `usb-console tinyusb` restores TinyUSB CDC + NCM. ROM download mode: hold **BOOT** and press **RESET**.
-
 **Example:**
 
 ```json
 {"type":"system","action":"reboot"}
 ```
 
-No JSON reply is sent before reboot (connection drops). `memory` and `version` push server broadcasts to all WS clients.
+No JSON reply is sent before reboot (connection drops). `memory` and `version` push server broadcasts to all WS clients (see **`version`** in [Server → client](#server--client-by-type)).
 
 ---
 
