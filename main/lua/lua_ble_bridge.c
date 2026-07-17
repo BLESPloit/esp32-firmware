@@ -627,6 +627,80 @@ void lua_ble_central_register_functions(lua_State *L) {
 
 // ── LUA C bindings - BLE "Peripheral" ──────────────────────────────────────────────────────────── 
 
+// Bluetooth SIG base UUID (little-endian wire order) for 16/32-bit UUID expansion.
+static const uint8_t sim_uuid_sig_base[12] = {
+    0xfb, 0x34, 0x9b, 0x5f, 0x80, 0x00, 0x00, 0x80,
+    0x00, 0x10, 0x00, 0x00,
+};
+
+static bool sim_uuid_flat128(const ble_uuid_t *uuid, uint8_t out[16]) {
+    switch (uuid->type) {
+    case BLE_UUID_TYPE_128:
+        memcpy(out, BLE_UUID128(uuid)->value, 16);
+        return true;
+    case BLE_UUID_TYPE_32:
+        memcpy(out, sim_uuid_sig_base, 12);
+        out[12] = (uint8_t)(BLE_UUID32(uuid)->value & 0xff);
+        out[13] = (uint8_t)((BLE_UUID32(uuid)->value >> 8) & 0xff);
+        out[14] = (uint8_t)((BLE_UUID32(uuid)->value >> 16) & 0xff);
+        out[15] = (uint8_t)((BLE_UUID32(uuid)->value >> 24) & 0xff);
+        return true;
+    case BLE_UUID_TYPE_16:
+        memcpy(out, sim_uuid_sig_base, 12);
+        out[12] = (uint8_t)(BLE_UUID16(uuid)->value & 0xff);
+        out[13] = (uint8_t)(BLE_UUID16(uuid)->value >> 8);
+        out[14] = 0;
+        out[15] = 0;
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool sim_uuid_equal(const ble_uuid_t *a, const ble_uuid_t *b) {
+    uint8_t flat_a[16], flat_b[16];
+    if (!sim_uuid_flat128(a, flat_a) || !sim_uuid_flat128(b, flat_b)) {
+        return false;
+    }
+    if (memcmp(flat_a, flat_b, 16) == 0) {
+        return true;
+    }
+    if (memcmp(flat_a, sim_uuid_sig_base, 12) != 0 ||
+        memcmp(flat_b, sim_uuid_sig_base, 12) != 0) {
+        return false;
+    }
+    uint16_t short_a = (uint16_t)(flat_a[12] | (flat_a[13] << 8));
+    uint16_t short_b = (uint16_t)(flat_b[12] | (flat_b[13] << 8));
+    return short_a != 0 && short_a == short_b;
+}
+
+static uint16_t sim_find_chr_handle_in_server(const ble_uuid_t *svc_uuid,
+                                              const ble_uuid_t *chr_uuid) {
+    if (!ble_server || ble_server->service_count <= 0) {
+        return 0;
+    }
+
+    for (int s = 0; s < ble_server->service_count; s++) {
+        struct ble_gatt_svc_def *svc = &ble_server->services[s];
+        if (!svc->uuid || !svc->characteristics ||
+            !sim_uuid_equal(svc->uuid, svc_uuid)) {
+            continue;
+        }
+
+        const struct ble_gatt_chr_def *ch;
+        for (ch = svc->characteristics; ch->uuid != NULL; ch++) {
+            if (!sim_uuid_equal(ch->uuid, chr_uuid)) {
+                continue;
+            }
+            char_context_t *ctx = (char_context_t *)ch->arg;
+            if (ctx && ctx->val_handle != 0) {
+                return ctx->val_handle;
+            }
+        }
+    }
+    return 0;
+}
+
 static uint16_t sim_find_chr_handle(const char *svc_uuid_str,
                                      const char *chr_uuid_str) {
     ble_uuid_any_t *svc_uuid = create_uuid_from_string(svc_uuid_str);
@@ -646,10 +720,18 @@ static uint16_t sim_find_chr_handle(const char *svc_uuid_str,
     uint16_t val_handle = 0;
     int rc = ble_gatts_find_chr(&svc_uuid->u, &chr_uuid->u,
                                  &def_handle, &val_handle);
+
+    if (rc == 0) {
+        free(svc_uuid);
+        free(chr_uuid);
+        return val_handle;
+    }
+
+    val_handle = sim_find_chr_handle_in_server(&svc_uuid->u, &chr_uuid->u);
     free(svc_uuid);
     free(chr_uuid);
 
-    if (rc != 0) {
+    if (val_handle == 0) {
         ESP_LOGW(TAG, "sim_find_chr_handle: not found svc=%s chr=%s rc=%d",
                  svc_uuid_str, chr_uuid_str, rc);
         return 0;
