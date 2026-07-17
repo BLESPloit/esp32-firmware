@@ -5,6 +5,8 @@
 #include "nimble/nimble_port_freertos.h"
 #include "host/ble_hs.h"
 #include "host/ble_uuid.h"
+#include "host/ble_gatt.h"
+#include "host/ble_att.h"
 #include "host/util/util.h"
 #include "console/console.h"
 #include "services/gap/ble_svc_gap.h"
@@ -30,7 +32,56 @@ static char cached_device_id[64] = {0};
 static relay_pending_t g_relay_pending = {0};
 
 static int ble_central_gap_event_handler(struct ble_gap_event *event, void *arg);
+void send_update_central_status_to_ws(const char *status);
 static relay_send_fn_t g_relay_send = websocket_broadcast_json_transient;
+
+static void central_on_ready(uint16_t conn_handle)
+{
+    send_update_central_status_to_ws("connected");
+    ble_lua_bridge_set_conn_handle(conn_handle);
+    lua_call_handler_async("on_connected", NULL);
+}
+
+static int central_mtu_exchange_cb(uint16_t conn_handle,
+                                   const struct ble_gatt_error *error,
+                                   uint16_t mtu, void *arg)
+{
+    uint16_t negotiated = ble_att_mtu(conn_handle);
+
+    if (error) {
+        ESP_LOGW(TAG, "MTU exchange failed: status=%d att_handle=0x%04x; continuing with mtu=%d",
+                 error->status, error->att_handle, negotiated);
+    } else {
+        ESP_LOGI(TAG, "MTU exchange complete; conn=0x%04x mtu=%d (cb mtu=%d)",
+                 conn_handle, negotiated, mtu);
+    }
+
+    if (conn_handle == central_conn_handle) {
+        central_on_ready(conn_handle);
+    }
+    return 0;
+}
+
+static void central_ensure_mtu(uint16_t conn_handle)
+{
+    if (conn_handle == BLE_HS_CONN_HANDLE_NONE) {
+        return;
+    }
+
+    uint16_t cur_mtu = ble_att_mtu(conn_handle);
+    if (cur_mtu > 23) {
+        ESP_LOGI(TAG, "MTU already %d on conn=0x%04x; skipping exchange", cur_mtu, conn_handle);
+        central_on_ready(conn_handle);
+        return;
+    }
+
+    ESP_LOGI(TAG, "Requesting ATT MTU exchange on conn=0x%04x (current=%d)", conn_handle, cur_mtu);
+    int rc = ble_gattc_exchange_mtu(conn_handle, central_mtu_exchange_cb, NULL);
+    if (rc != 0) {
+        ESP_LOGW(TAG, "ble_gattc_exchange_mtu failed: %d; continuing with default MTU", rc);
+        central_on_ready(conn_handle);
+    }
+}
 
 // ── HELPERS ────────────────────────────────────────────────── 
 
@@ -345,9 +396,7 @@ void ble_central_attach_from_discovery(uint16_t conn_handle,
 
     ble_gap_set_event_cb(conn_handle, ble_central_gap_event_handler, NULL);
 
-    send_update_central_status_to_ws("connected");
-    ble_lua_bridge_set_conn_handle(conn_handle);
-    lua_call_handler_async("on_connected", NULL);
+    central_ensure_mtu(conn_handle);
 }
 
 
@@ -932,10 +981,7 @@ esp_err_t ble_central_reattach(uint16_t conn_handle)
     // Re-register central's GAP event handler (discovery may have taken it over)
     ble_gap_set_event_cb(conn_handle, ble_central_gap_event_handler, NULL);
 
-    // Notify client + Lua
-    send_update_central_status_to_ws("connected");
-    ble_lua_bridge_set_conn_handle(conn_handle);
-    lua_call_handler_async("on_connected", NULL);
+    central_ensure_mtu(conn_handle);
 
     return ESP_OK;
 }
@@ -976,12 +1022,9 @@ static int ble_central_gap_event_handler(struct ble_gap_event *event, void *arg)
             if (ble_gap_conn_find(central_conn_handle, &desc) == 0 && central_ctx) {
                 memcpy(&central_ctx->device_addr, &desc.peer_id_addr, sizeof(ble_addr_t));
                 central_ctx->conn_handle = central_conn_handle;
-            }  
+            }
 
-            send_update_central_status_to_ws("connected");
-            
-            ble_lua_bridge_set_conn_handle(event->connect.conn_handle);
-            lua_call_handler_async("on_connected", NULL);
+            central_ensure_mtu(event->connect.conn_handle);
 
         }
 
@@ -1011,6 +1054,11 @@ static int ble_central_gap_event_handler(struct ble_gap_event *event, void *arg)
         
     case BLE_GAP_EVENT_CONN_UPDATE_REQ:
         ESP_LOGI(TAG, "Connection update request");
+        break;
+
+    case BLE_GAP_EVENT_MTU:
+        ESP_LOGI(TAG, "GAP MTU update; conn=0x%04x mtu=%d",
+                 event->mtu.conn_handle, event->mtu.value);
         break;
         
     case BLE_GAP_EVENT_NOTIFY_RX:

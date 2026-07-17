@@ -7,6 +7,7 @@
 #include "esp_log.h"
 #include "host/ble_hs.h"
 #include "host/ble_gatt.h"
+#include "host/ble_att.h"
 #include "host/ble_uuid.h"
 #include <lua.h>
 #include <lauxlib.h>
@@ -358,12 +359,20 @@ static int wait_op(ble_op_result_t *res) {
 // ── MTU from LUA ──────────────────────────────────────────────────────────── 
 
 // get_mtu()  ->  integer
-// Returns the negotiated ATT MTU for the current peripheral connection, or 23 (BLE default) if not connected / MTU not yet exchanged.
+// Returns the negotiated ATT MTU for the current connection, or 23 (BLE default) if not connected / MTU not yet exchanged.
 // The usable notify payload is get_mtu() - 3.
 static int lua_ble_get_mtu(lua_State *L) {
-    uint16_t mtu = 23; // BLE spec default 
-    if (sim_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
-        uint16_t negotiated = ble_att_mtu(sim_conn_handle);
+    uint16_t mtu = 23; // BLE spec default
+    uint16_t handle = BLE_HS_CONN_HANDLE_NONE;
+
+    if (g_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+        handle = g_conn_handle;
+    } else if (sim_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+        handle = sim_conn_handle;
+    }
+
+    if (handle != BLE_HS_CONN_HANDLE_NONE) {
+        uint16_t negotiated = ble_att_mtu(handle);
         if (negotiated > 0) {
             mtu = negotiated;
         }
@@ -388,6 +397,14 @@ static int lua_ble_set_preferred_mtu(lua_State *L) {
         return 2;
     }
     ESP_LOGI(TAG, "preferred ATT MTU set to %d", mtu);
+
+    if (g_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+        rc = ble_gattc_exchange_mtu(g_conn_handle, NULL, NULL);
+        if (rc != 0) {
+            ESP_LOGW(TAG, "set_preferred_mtu: ble_gattc_exchange_mtu rc=%d", rc);
+        }
+    }
+
     lua_pushboolean(L, 1);
     return 1;
 }

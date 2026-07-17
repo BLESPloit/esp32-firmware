@@ -8,6 +8,7 @@
 #include "nimble/nimble_port_freertos.h"
 #include "host/ble_gap.h"
 #include "host/ble_gatt.h"
+#include "host/ble_att.h"
 #include "host/ble_hs.h"
 #include "host/ble_sm.h"
 #include "host/util/util.h"
@@ -39,6 +40,85 @@ extern int scanned_device_count;
 
 // forward declarations
 static int ble_discovery_gap_event_handler(struct ble_gap_event *event, void *arg);
+
+typedef enum {
+    DISC_POST_CONNECT_DISCOVERY = 0,
+    DISC_POST_CONNECT_PAIRING_RETRY,
+    DISC_POST_CONNECT_READ_RETRY,
+    DISC_POST_CONNECT_READ_RESUME_DISCOVERY,
+} disc_post_connect_action_t;
+
+static disc_post_connect_action_t s_disc_post_connect_action = DISC_POST_CONNECT_DISCOVERY;
+
+static void discovery_post_connect_continue(discovery_context_t *ctx)
+{
+    if (!ctx) {
+        return;
+    }
+
+    switch (s_disc_post_connect_action) {
+    case DISC_POST_CONNECT_PAIRING_RETRY:
+        ctx->retrying_pairing_strategy = false;
+        start_pairing_phase(ctx);
+        break;
+    case DISC_POST_CONNECT_READ_RETRY:
+        retry_failed_read(ctx);
+        break;
+    case DISC_POST_CONNECT_READ_RESUME_DISCOVERY:
+        start_service_discovery(ctx);
+        break;
+    case DISC_POST_CONNECT_DISCOVERY:
+    default:
+        start_service_discovery(ctx);
+        break;
+    }
+}
+
+static int discovery_mtu_exchange_cb(uint16_t conn_handle,
+                                    const struct ble_gatt_error *error,
+                                    uint16_t mtu, void *arg)
+{
+    discovery_context_t *ctx = (discovery_context_t *)arg;
+    uint16_t negotiated = ble_att_mtu(conn_handle);
+
+    if (error) {
+        ESP_LOGW(TAG, "MTU exchange failed: status=%d att_handle=0x%04x; continuing with mtu=%d",
+                 error->status, error->att_handle, negotiated);
+    } else {
+        ESP_LOGI(TAG, "MTU exchange complete; conn=0x%04x mtu=%d (cb mtu=%d)",
+                 conn_handle, negotiated, mtu);
+    }
+
+    if (ctx && ctx == g_disc_ctx && conn_handle == ctx->conn_handle) {
+        discovery_post_connect_continue(ctx);
+    }
+    return 0;
+}
+
+static void discovery_start_post_connect(discovery_context_t *ctx,
+                                         disc_post_connect_action_t action)
+{
+    if (!ctx || ctx->conn_handle == BLE_HS_CONN_HANDLE_NONE) {
+        return;
+    }
+
+    s_disc_post_connect_action = action;
+
+    uint16_t conn = ctx->conn_handle;
+    uint16_t cur_mtu = ble_att_mtu(conn);
+    if (cur_mtu > 23) {
+        ESP_LOGI(TAG, "MTU already %d on conn=0x%04x; skipping exchange", cur_mtu, conn);
+        discovery_post_connect_continue(ctx);
+        return;
+    }
+
+    ESP_LOGI(TAG, "Requesting ATT MTU exchange on conn=0x%04x (current=%d)", conn, cur_mtu);
+    int rc = ble_gattc_exchange_mtu(conn, discovery_mtu_exchange_cb, ctx);
+    if (rc != 0) {
+        ESP_LOGW(TAG, "ble_gattc_exchange_mtu failed: %d; continuing with default MTU", rc);
+        discovery_post_connect_continue(ctx);
+    }
+}
 
 
 // ── Helpers ────────────────────────────────────────────────── 
@@ -557,28 +637,25 @@ static int ble_discovery_gap_event_handler(struct ble_gap_event *event, void *ar
                 if (g_disc_ctx->retrying_pairing_strategy && g_disc_ctx->auto_retry_strategies) {
                     ESP_LOGI(TAG, "AUTO mode: Reconnected for pairing strategy retry");
                     vTaskDelay(pdMS_TO_TICKS(500));
-                    
-                    // Clear the retry flag and resume pairing
-                    g_disc_ctx->retrying_pairing_strategy = false;
-                    start_pairing_phase(g_disc_ctx);
+                    discovery_start_post_connect(g_disc_ctx, DISC_POST_CONNECT_PAIRING_RETRY);
                 }
                 // Check if this is a read retry reconnection
                 else if (g_disc_ctx->disconnected_during_read) {
                     ESP_LOGI(TAG, "Reconnected successfully! Resuming value reading...");
                     g_disc_ctx->disconnected_during_read = false;
-                    
+
                     vTaskDelay(pdMS_TO_TICKS(1000));
-                    
+
                     if (g_disc_ctx->retry_in_progress) {
-                        retry_failed_read(g_disc_ctx);
+                        discovery_start_post_connect(g_disc_ctx, DISC_POST_CONNECT_READ_RETRY);
                     } else {
                         ESP_LOGW(TAG, "Reconnected but no retry pending, resuming discovery");
-                        start_service_discovery(g_disc_ctx);
+                        discovery_start_post_connect(g_disc_ctx, DISC_POST_CONNECT_READ_RESUME_DISCOVERY);
                     }
                 } else {
-                    // Fresh connection - start discovery
+                    // Fresh connection - exchange MTU then start discovery
                     vTaskDelay(pdMS_TO_TICKS(100)); // let HCI settle
-                    start_service_discovery(g_disc_ctx);
+                    discovery_start_post_connect(g_disc_ctx, DISC_POST_CONNECT_DISCOVERY);
                 }
             }
         } else {
@@ -727,7 +804,8 @@ static int ble_discovery_gap_event_handler(struct ble_gap_event *event, void *ar
         return 0;
 
     case BLE_GAP_EVENT_MTU:
-        ESP_LOGI(TAG, "GAP event MTU (to be implemented)");
+        ESP_LOGI(TAG, "GAP MTU update; conn=0x%04x mtu=%d",
+                 event->mtu.conn_handle, event->mtu.value);
         return 0;
 
     case BLE_GAP_EVENT_NOTIFY_RX:
