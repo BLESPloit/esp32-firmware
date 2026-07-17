@@ -21,3 +21,8 @@ bool        ble_sim_lookup_chr_by_val_handle(uint16_t val_handle,
 void        configure_nimble_security_for_peripheral(ble_server_t *server);
 int         ble_sim_smp_event(struct ble_gap_event *event, void *arg);
 esp_err_t ble_adv_resolve(const char *device_folder);
+
+bool        ble_sim_teardown_active(void);
+void        ble_sim_set_teardown(bool active);
+void        ble_sim_stop_all_ext_adv(void);
+void        ble_sim_clear_ext_adv_sets(void);

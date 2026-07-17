@@ -684,6 +684,18 @@ bool is_currently_advertising(void)
     return ble_gap_adv_active();
 }
 
+static void ble_sim_maybe_restart_advertising(const char *event_name)
+{
+    (void)event_name;
+    if (ble_sim_teardown_active()) {
+        return;
+    }
+    if (!ble_server) {
+        return;
+    }
+    ble_start_advertising();
+}
+
 
 // ── BLE simulation GAP event handler ────────────────────────────────────────────────── 
 
@@ -719,7 +731,7 @@ int ble_sim_gap_event(struct ble_gap_event *event, void *arg)
             }
         } else {
             // Connection failed — resume advertising
-            ble_start_advertising();
+            ble_sim_maybe_restart_advertising("CONNECT_failed");
         }
         sim_conn_handle = event->connect.conn_handle;
         break;
@@ -734,7 +746,7 @@ int ble_sim_gap_event(struct ble_gap_event *event, void *arg)
             if (inst->rotation_timer)
                 xTimerStart(inst->rotation_timer, 0);
         }
-        ble_start_advertising();
+        ble_sim_maybe_restart_advertising("DISCONNECT");
         break;
 
     case BLE_GAP_EVENT_CONN_UPDATE:
@@ -750,7 +762,7 @@ int ble_sim_gap_event(struct ble_gap_event *event, void *arg)
 
     case BLE_GAP_EVENT_ADV_COMPLETE:
         WS_LOGW(TAG, "advertise complete; reason=%d", event->adv_complete.reason);
-        ble_start_advertising();
+        ble_sim_maybe_restart_advertising("ADV_COMPLETE");
         break;
 
     case BLE_GAP_EVENT_PHY_UPDATE_COMPLETE:
