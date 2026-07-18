@@ -8,6 +8,17 @@
 #define RECONNECT_DELAY_MS 1000
 #define RECONNECT_BACKOFF_MULTIPLIER 2
 
+// Central connect params: short interval + 5s supervision (Android-like).
+#define BLE_CENTRAL_CONN_ITVL_MIN            BLE_GAP_CONN_ITVL_MS(15)  // 0x000C 
+#define BLE_CENTRAL_CONN_ITVL_MAX            BLE_GAP_CONN_ITVL_MS(30)  // 0x0018 
+#define BLE_CENTRAL_CONN_SUPERVISION_TIMEOUT 0x01F4                    // 5000 ms
+#define BLE_CENTRAL_POST_CONNECT_SETTLE_MS   300
+
+void ble_central_fill_conn_params(struct ble_gap_conn_params *params);
+
+// Resolve own address type via ble_hs_id_infer_auto(0). Returns NimBLE rc. 
+int ble_central_infer_own_addr_type(uint8_t *own_addr_type);
+
 // forward declaration
 struct discovery_context;
 

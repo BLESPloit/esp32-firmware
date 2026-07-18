@@ -2,6 +2,7 @@
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/timers.h"
 #include "esp_log.h"
 #include "esp_nimble_hci.h"
 #include "nimble/nimble_port.h"
@@ -49,6 +50,32 @@ typedef enum {
 } disc_post_connect_action_t;
 
 static disc_post_connect_action_t s_disc_post_connect_action = DISC_POST_CONNECT_DISCOVERY;
+static TimerHandle_t s_post_connect_timer = NULL;
+static discovery_context_t *s_post_connect_ctx = NULL;
+
+void ble_central_fill_conn_params(struct ble_gap_conn_params *params)
+{
+    if (!params) {
+        return;
+    }
+    memset(params, 0, sizeof(*params));
+    params->scan_itvl = 0x0010;
+    params->scan_window = 0x0010;
+    params->itvl_min = BLE_CENTRAL_CONN_ITVL_MIN;
+    params->itvl_max = BLE_CENTRAL_CONN_ITVL_MAX;
+    params->latency = 0;
+    params->supervision_timeout = BLE_CENTRAL_CONN_SUPERVISION_TIMEOUT;
+    params->min_ce_len = 0;
+    params->max_ce_len = 0;
+}
+
+int ble_central_infer_own_addr_type(uint8_t *own_addr_type)
+{
+    if (!own_addr_type) {
+        return BLE_HS_EINVAL;
+    }
+    return ble_hs_id_infer_auto(0, own_addr_type);
+}
 
 static void discovery_post_connect_continue(discovery_context_t *ctx)
 {
@@ -118,6 +145,98 @@ static void discovery_start_post_connect(discovery_context_t *ctx,
         ESP_LOGW(TAG, "ble_gattc_exchange_mtu failed: %d; continuing with default MTU", rc);
         discovery_post_connect_continue(ctx);
     }
+}
+
+// Runs outside the NimBLE host task so the GAP callback can return immediately
+// and answer peripheral L2CAP Connection Parameter Update requests. 
+static void discovery_post_connect_timer_cb(TimerHandle_t xTimer)
+{
+    (void)xTimer;
+    discovery_context_t *ctx = s_post_connect_ctx;
+    if (ctx && ctx == g_disc_ctx &&
+        ctx->conn_handle != BLE_HS_CONN_HANDLE_NONE &&
+        ctx->conn_handle == discovery_conn_handle) {
+        ESP_LOGI(TAG, "Post-connect settle done; starting ATT on conn=0x%04x",
+                 ctx->conn_handle);
+        discovery_start_post_connect(ctx, s_disc_post_connect_action);
+    } else {
+        ESP_LOGW(TAG, "Post-connect timer fired but connection no longer valid");
+    }
+}
+
+static void discovery_cancel_post_connect(void)
+{
+    if (s_post_connect_timer) {
+        xTimerStop(s_post_connect_timer, 0);
+    }
+    s_post_connect_ctx = NULL;
+}
+
+static void discovery_schedule_post_connect(discovery_context_t *ctx,
+                                            disc_post_connect_action_t action,
+                                            uint32_t delay_ms)
+{
+    if (!ctx) {
+        return;
+    }
+
+    s_disc_post_connect_action = action;
+    s_post_connect_ctx = ctx;
+
+    uint32_t ticks = pdMS_TO_TICKS(delay_ms > 0 ? delay_ms : 1);
+    if (ticks == 0) {
+        ticks = 1;
+    }
+
+    if (s_post_connect_timer == NULL) {
+        s_post_connect_timer = xTimerCreate("disc_pc", ticks, pdFALSE, NULL,
+                                            discovery_post_connect_timer_cb);
+        if (s_post_connect_timer == NULL) {
+            ESP_LOGE(TAG, "Failed to create post-connect timer; starting ATT immediately");
+            discovery_start_post_connect(ctx, action);
+            return;
+        }
+    } else {
+        xTimerStop(s_post_connect_timer, 0);
+    }
+
+    // ChangePeriod also starts a dormant timer. 
+    if (xTimerChangePeriod(s_post_connect_timer, ticks, 0) != pdPASS) {
+        ESP_LOGE(TAG, "Failed to arm post-connect timer; starting ATT immediately");
+        discovery_start_post_connect(ctx, action);
+        return;
+    }
+
+    ESP_LOGI(TAG, "Scheduled post-connect ATT in %lu ms (action=%d)",
+             (unsigned long)delay_ms, (int)action);
+}
+
+// Accept peer L2CAP/LL connection-parameter updates immediately.
+// Return 0 = accept, non-zero HCI code = reject. 
+static int discovery_handle_conn_update_req(struct ble_gap_event *event)
+{
+    const struct ble_gap_upd_params *peer = event->conn_update_req.peer_params;
+    struct ble_gap_upd_params *self = event->conn_update_req.self_params;
+    const char *kind = (event->type == BLE_GAP_EVENT_L2CAP_UPDATE_REQ)
+                           ? "L2CAP" : "LL";
+
+    if (peer) {
+        ESP_LOGI(TAG, "%s conn update req: itvl=%u-%u lat=%u tmo=%u",
+                 kind, peer->itvl_min, peer->itvl_max,
+                 peer->latency, peer->supervision_timeout);
+    } else {
+        ESP_LOGI(TAG, "%s conn update req", kind);
+    }
+
+    // LL path exposes self_params for negotiation; L2CAP path may not. 
+    if (self && peer) {
+        *self = *peer;
+        if (self->supervision_timeout < BLE_CENTRAL_CONN_SUPERVISION_TIMEOUT) {
+            self->supervision_timeout = BLE_CENTRAL_CONN_SUPERVISION_TIMEOUT;
+        }
+    }
+
+    return 0; // accept immediately 
 }
 
 
@@ -532,15 +651,7 @@ int ble_connect_and_discover(const char *addr_str, bool save_result, bool open_c
 
     vTaskDelay(pdMS_TO_TICKS(150));
     
-    // Set connection parameters
-    conn_params.scan_itvl = 0x0010;
-    conn_params.scan_window = 0x0010;
-    conn_params.itvl_min = BLE_GAP_INITIAL_CONN_ITVL_MIN;
-    conn_params.itvl_max = BLE_GAP_INITIAL_CONN_ITVL_MAX;
-    conn_params.latency = 0;
-    conn_params.supervision_timeout = 0x0100;
-    conn_params.min_ce_len = 0;
-    conn_params.max_ce_len = 0;
+    ble_central_fill_conn_params(&conn_params);
     
     // Prepare target address
     ble_addr_t addr;
@@ -577,8 +688,17 @@ int ble_connect_and_discover(const char *addr_str, bool save_result, bool open_c
     ble_hs_sched_reset(0);
     vTaskDelay(pdMS_TO_TICKS(200));    
 
+    uint8_t own_addr_type;
+    rc = ble_central_infer_own_addr_type(&own_addr_type);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "Failed to infer own addr type: %d", rc);
+        destroy_discovery_context(g_disc_ctx);
+        g_disc_ctx = NULL;
+        return rc;
+    }
+
     // Initiate connection
-    rc = ble_gap_connect(BLE_OWN_ADDR_PUBLIC, &addr, 30000, &conn_params,
+    rc = ble_gap_connect(own_addr_type, &addr, 30000, &conn_params,
                         ble_discovery_gap_event_handler, NULL);
     
     if (rc != 0) {
@@ -597,8 +717,8 @@ int ble_connect_and_discover(const char *addr_str, bool save_result, bool open_c
             err_hint = " (BLE_HS_ENOTSYNCED: host not yet synced with controller)";
 
         ESP_LOGE(TAG, "ble_gap_connect failed: rc=%d%s", rc, err_hint);
-        ESP_LOGE(TAG, "  -> addr type=%d, conn_active=%d, disc_active=%d",
-                addr.type, ble_gap_conn_active(), ble_gap_disc_active());
+        ESP_LOGE(TAG, "  -> peer addr type=%d, own=%d, conn_active=%d, disc_active=%d",
+                addr.type, own_addr_type, ble_gap_conn_active(), ble_gap_disc_active());
         destroy_discovery_context(g_disc_ctx);
         g_disc_ctx = NULL;
         return rc;
@@ -633,29 +753,31 @@ static int ble_discovery_gap_event_handler(struct ble_gap_event *event, void *ar
 
                 web_broadcast_connection_progress_connection(g_disc_ctx, "connected");
 
-                //  Check if reconnecting for pairing strategy retry (AUTO mode)
+                // Do not block the NimBLE host task here — peripherals often
+                // send L2CAP Connection Parameter Update immediately. 
                 if (g_disc_ctx->retrying_pairing_strategy && g_disc_ctx->auto_retry_strategies) {
                     ESP_LOGI(TAG, "AUTO mode: Reconnected for pairing strategy retry");
-                    vTaskDelay(pdMS_TO_TICKS(500));
-                    discovery_start_post_connect(g_disc_ctx, DISC_POST_CONNECT_PAIRING_RETRY);
-                }
-                // Check if this is a read retry reconnection
-                else if (g_disc_ctx->disconnected_during_read) {
+                    discovery_schedule_post_connect(g_disc_ctx,
+                                                    DISC_POST_CONNECT_PAIRING_RETRY,
+                                                    BLE_CENTRAL_POST_CONNECT_SETTLE_MS);
+                } else if (g_disc_ctx->disconnected_during_read) {
                     ESP_LOGI(TAG, "Reconnected successfully! Resuming value reading...");
                     g_disc_ctx->disconnected_during_read = false;
 
-                    vTaskDelay(pdMS_TO_TICKS(1000));
-
                     if (g_disc_ctx->retry_in_progress) {
-                        discovery_start_post_connect(g_disc_ctx, DISC_POST_CONNECT_READ_RETRY);
+                        discovery_schedule_post_connect(g_disc_ctx,
+                                                        DISC_POST_CONNECT_READ_RETRY,
+                                                        BLE_CENTRAL_POST_CONNECT_SETTLE_MS);
                     } else {
                         ESP_LOGW(TAG, "Reconnected but no retry pending, resuming discovery");
-                        discovery_start_post_connect(g_disc_ctx, DISC_POST_CONNECT_READ_RESUME_DISCOVERY);
+                        discovery_schedule_post_connect(g_disc_ctx,
+                                                        DISC_POST_CONNECT_READ_RESUME_DISCOVERY,
+                                                        BLE_CENTRAL_POST_CONNECT_SETTLE_MS);
                     }
                 } else {
-                    // Fresh connection - exchange MTU then start discovery
-                    vTaskDelay(pdMS_TO_TICKS(100)); // let HCI settle
-                    discovery_start_post_connect(g_disc_ctx, DISC_POST_CONNECT_DISCOVERY);
+                    discovery_schedule_post_connect(g_disc_ctx,
+                                                    DISC_POST_CONNECT_DISCOVERY,
+                                                    BLE_CENTRAL_POST_CONNECT_SETTLE_MS);
                 }
             }
         } else {
@@ -701,6 +823,7 @@ static int ble_discovery_gap_event_handler(struct ble_gap_event *event, void *ar
     
     case BLE_GAP_EVENT_DISCONNECT:
         ESP_LOGI(TAG, "Disconnect; reason=0x%04x (%d)", event->disconnect.reason, event->disconnect.reason);
+        discovery_cancel_post_connect();
         discovery_conn_handle = BLE_HS_CONN_HANDLE_NONE;
         
         if (g_disc_ctx) {
@@ -742,17 +865,14 @@ static int ble_discovery_gap_event_handler(struct ble_gap_event *event, void *ar
                 
                 // Reconnect to try next strategy
                 struct ble_gap_conn_params conn_params = {0};
-                conn_params.scan_itvl = 0x0010;
-                conn_params.scan_window = 0x0010;
-                conn_params.itvl_min = BLE_GAP_INITIAL_CONN_ITVL_MIN;
-                conn_params.itvl_max = BLE_GAP_INITIAL_CONN_ITVL_MAX;
-                conn_params.latency = 0;
-                conn_params.supervision_timeout = 0x0100;
-                conn_params.min_ce_len = 0;
-                conn_params.max_ce_len = 0;
-                
-                int rc = ble_gap_connect(BLE_OWN_ADDR_PUBLIC, &g_disc_ctx->device_addr, 30000,
-                                        &conn_params, ble_discovery_gap_event_handler, NULL);
+                ble_central_fill_conn_params(&conn_params);
+
+                uint8_t own_addr_type;
+                int rc = ble_central_infer_own_addr_type(&own_addr_type);
+                if (rc == 0) {
+                    rc = ble_gap_connect(own_addr_type, &g_disc_ctx->device_addr, 30000,
+                                         &conn_params, ble_discovery_gap_event_handler, NULL);
+                }
                 
                 if (rc != 0) {
                     ESP_LOGE(TAG, "Reconnection for pairing retry failed: %d", rc);
@@ -789,15 +909,11 @@ static int ble_discovery_gap_event_handler(struct ble_gap_event *event, void *ar
 
     case BLE_GAP_EVENT_CONN_UPDATE:
         ESP_LOGI(TAG, "Connection updated; status=%d", event->conn_update.status);
-//        rc = ble_gap_conn_find(event->conn_update.conn_handle, &desc);
-//        if (rc == 0) {
-//            ble_print_conn_desc(&desc);
-//        }
         break;
-        
+
+    case BLE_GAP_EVENT_L2CAP_UPDATE_REQ:
     case BLE_GAP_EVENT_CONN_UPDATE_REQ:
-        ESP_LOGI(TAG, "Connection update request");
-        break;
+        return discovery_handle_conn_update_req(event);
         
     case BLE_GAP_EVENT_REATTEMPT_COUNT:
         ESP_LOGI(TAG, "Connection reattempt count: %d", event->reattempt_cnt.count);
@@ -833,6 +949,8 @@ esp_err_t ble_discovery_cleanup(void) {
     int rc;
     
     ESP_LOGI(TAG, "Deinitializing BLE discovery...");
+
+    discovery_cancel_post_connect();
        
     // Disconnect from any connected device (central role)
     if (discovery_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
@@ -879,20 +997,20 @@ void reconnect_and_resume(discovery_context_t *ctx)
     
     web_broadcast_connection_progress_connection(g_disc_ctx, "reconnecting");
 
-    // Prepare connection parameters
     struct ble_gap_conn_params conn_params = {0};
-    conn_params.scan_itvl = 0x0010;
-    conn_params.scan_window = 0x0010;
-    conn_params.itvl_min = BLE_GAP_INITIAL_CONN_ITVL_MIN;
-    conn_params.itvl_max = BLE_GAP_INITIAL_CONN_ITVL_MAX;
-    conn_params.latency = 0;
-    conn_params.supervision_timeout = 0x0100;
-    conn_params.min_ce_len = 0;
-    conn_params.max_ce_len = 0;
+    ble_central_fill_conn_params(&conn_params);
+
+    uint8_t own_addr_type;
+    int rc = ble_central_infer_own_addr_type(&own_addr_type);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "Failed to infer own addr type: %d", rc);
+        discovery_complete(ctx, rc);
+        return;
+    }
     
     // Initiate reconnection
-    int rc = ble_gap_connect(BLE_OWN_ADDR_PUBLIC, &ctx->device_addr, 30000,
-                            &conn_params, ble_discovery_gap_event_handler, NULL);
+    rc = ble_gap_connect(own_addr_type, &ctx->device_addr, 30000,
+                         &conn_params, ble_discovery_gap_event_handler, NULL);
     
     if (rc != 0) {
         ESP_LOGE(TAG, "ble_gap_connect failed with error: %d", rc);

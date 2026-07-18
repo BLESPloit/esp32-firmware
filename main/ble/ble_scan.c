@@ -20,6 +20,7 @@
 #include "common/utils.h"
 #include "api/web_server.h" // web_scan_push_device, web_scan_broadcast_status
 #include "ble/ble_scan.h"
+#include "ble/ble_discovery.h"
 
 
 static const char *TAG = "BLE scan";
@@ -479,9 +480,16 @@ esp_err_t start_ble_scan(bool connectable_only)
     disc_params.window = 0;
     disc_params.filter_policy = 0;
     disc_params.limited = 0;
-    
-    int rc = ble_gap_disc(BLE_OWN_ADDR_PUBLIC, BLE_SCAN_DURATION_MS,
-                         &disc_params, ble_scanner_gap_event_handler, NULL);
+
+    uint8_t own_addr_type;
+    int rc = ble_central_infer_own_addr_type(&own_addr_type);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "Failed to infer own addr type: %d", rc);
+        return ESP_FAIL;
+    }
+
+    rc = ble_gap_disc(own_addr_type, BLE_SCAN_DURATION_MS,
+                      &disc_params, ble_scanner_gap_event_handler, NULL);
     if (rc != 0) {
         ESP_LOGE(TAG, "Failed to start scan: %d", rc);
         return ESP_FAIL;
