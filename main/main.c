@@ -16,6 +16,7 @@
 #include "ble/ble_scan.h"
 #include "hw/button.h"
 #include "hw/board.h"
+#include "hw/named_gpio.h"
 #include "hw/display.h"
 #include "api/console.h"
 #include "ble/device_parser.h"
@@ -57,9 +58,11 @@ void app_main(void)
     display_init();
     lvgl_init();
 
-    // Initialize button manager
+    // Initialize button manager and named GPIOs
     ESP_ERROR_CHECK(button_init());
     ESP_ERROR_CHECK(board_register_buttons());
+    ESP_ERROR_CHECK(named_gpio_init());
+    ESP_ERROR_CHECK(board_register_named_gpios());
 
     log_memory_usage("after button");
 

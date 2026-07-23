@@ -17,6 +17,7 @@
 #include "lua/lua_ble_bridge.h"
 #include "lua/lua_crypto.h"
 #include "lua/lua_gfx.h"
+#include "lua/lua_gpio.h"
 #include "lua/lua_hook.h"
 
 #define TAG "LUA"
@@ -520,6 +521,9 @@ esp_err_t lua_init_persistent_minimal(const char *script_path, bool central,
   
     // Register cryptographic functions
     lua_crypto_register_functions(g_lua_state);
+
+    // Register named GPIO functions (central + peripheral)
+    lua_gpio_register_functions(g_lua_state);
 
     // Register utility functions
     lua_register(g_lua_state, "bin_to_hex", lua_bin_to_hex);
