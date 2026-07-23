@@ -7,6 +7,7 @@ file(GLOB BASE_SRCS
     "graphics/websocket_gfx.c"
     "hw/button.c"
     "hw/board.c"
+    "hw/named_gpio.c"
     "interface/*.c"
     "lua/*.c"
     "main.c"
@@ -40,5 +41,5 @@ idf_component_register(
              esp_http_server esp_hw_support esp_lcd 
              esp_netif esp_pm esp_timer esp_wifi  
              nvs_flash mbedtls 
-    PRIV_REQUIRES esp_driver_usb_serial_jtag json
+    PRIV_REQUIRES esp_driver_usb_serial_jtag json espressif__esp_tinyusb
 )
