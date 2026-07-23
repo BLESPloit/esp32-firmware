@@ -857,7 +857,30 @@ static int lua_ble_notify_raw(lua_State *L) {
     return 1;
 }
 
+// ble_connected() — peripheral sim link
+static int lua_ble_sim_connected(lua_State *L) {
+    lua_pushboolean(L, sim_conn_handle != BLE_HS_CONN_HANDLE_NONE);
+    return 1;
+}
 
+// ble_disconnect() — terminate active peripheral sim connection
+static int lua_ble_disconnect(lua_State *L) {
+    if (sim_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
+        lua_pushboolean(L, 0);
+        lua_pushstring(L, "ble_disconnect: not connected");
+        return 2;
+    }
+
+    int rc = ble_gap_terminate(sim_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+    if (rc != 0) {
+        lua_pushboolean(L, 0);
+        lua_pushfstring(L, "ble_disconnect: rc=%d", rc);
+        return 2;
+    }
+
+    lua_pushboolean(L, 1);
+    return 1;
+}
 
 void lua_ble_peripheral_register_functions(lua_State *L) {
     lua_register(L, "ble_notify", lua_ble_notify);
@@ -867,6 +890,8 @@ void lua_ble_peripheral_register_functions(lua_State *L) {
     lua_register(L, "adv_enable",   lua_adv_enable);
     lua_register(L, "adv_disable",  lua_adv_disable);
 
+    lua_register(L, "ble_connected",       lua_ble_sim_connected);
+    lua_register(L, "ble_disconnect",      lua_ble_disconnect);
     lua_register(L, "get_mtu",             lua_ble_get_mtu); 
     lua_register(L, "set_preferred_mtu",   lua_ble_set_preferred_mtu);
 

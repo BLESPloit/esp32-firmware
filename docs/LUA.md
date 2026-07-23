@@ -119,7 +119,47 @@ BLE peripheral (advertising profile **`id`** values come from **`peripheral/adv.
 | `get_adv_bd_addr(profile_id)` → addr \| nil [, err] | Resolved TX address string when available. |
 | `adv_enable(profile_id)` → ok [, err] | Start advertising instance. |
 | `adv_disable(profile_id)` → ok [, err] | Stop instance. |
+| `ble_connected()` → bool | Active sim connection present. |
+| `ble_disconnect()` → ok [, err] | Terminate the connected central (`BLE_ERR_REM_USER_CONN_TERM`). Handle clears on disconnect event. |
 | `get_mtu()` / `set_preferred_mtu(mtu)` | Same semantics as central; `get_mtu()` reads the sim connection handle. |
+
+Optional Lua globals (called asynchronously when a central connects or disconnects):
+
+| Function | Role |
+|----------|------|
+| `on_connected` | Called after a central successfully connects to the sim. |
+| `on_disconnected` | Called after the sim link drops (peer or `ble_disconnect()`). |
+
+Example — disconnect if an expected write does not arrive within 1s (`delay` has no cancel; use a generation guard):
+
+```lua
+local got_expected = false
+local conn_gen = 0
+local pending_gen = 0
+
+function on_connected()
+  got_expected = false
+  conn_gen = conn_gen + 1
+  pending_gen = conn_gen
+  delay(1, "payload_timeout")
+end
+
+function payload_timeout()
+  if pending_gen ~= conn_gen then
+    return
+  end
+  if not got_expected and ble_connected() then
+    ble_disconnect()
+  end
+end
+
+function on_write_example(input)
+  if is_expected(input) then
+    got_expected = true
+  end
+  return input
+end
+```
 
 ---
 

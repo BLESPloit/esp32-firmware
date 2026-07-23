@@ -729,11 +729,14 @@ int ble_sim_gap_event(struct ble_gap_event *event, void *arg)
                 if (rc != 0)
                     WS_LOGE(TAG, "Failed to initiate security: %d", rc);
             }
+
+            sim_conn_handle = event->connect.conn_handle;
+            lua_call_handler_async("on_connected", NULL);
         } else {
             // Connection failed — resume advertising
+            sim_conn_handle = BLE_HS_CONN_HANDLE_NONE;
             ble_sim_maybe_restart_advertising("CONNECT_failed");
         }
-        sim_conn_handle = event->connect.conn_handle;
         break;
 
     case BLE_GAP_EVENT_DISCONNECT:
@@ -747,6 +750,8 @@ int ble_sim_gap_event(struct ble_gap_event *event, void *arg)
                 xTimerStart(inst->rotation_timer, 0);
         }
         ble_sim_maybe_restart_advertising("DISCONNECT");
+        sim_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+        lua_call_handler_async("on_disconnected", NULL);
         break;
 
     case BLE_GAP_EVENT_CONN_UPDATE:
