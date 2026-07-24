@@ -1,6 +1,7 @@
 #include "esp_log.h"
 #include "nvs_flash.h"
-
+#include "freertos/FreeRTOS.h"
+#include "freertos/event_groups.h"
 
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
@@ -22,6 +23,9 @@ struct ble_hs_cfg;
 
 void ble_store_config_init(void);
 
+static EventGroupHandle_t s_ble_sync_event_group;
+#define BLE_SYNC_BIT (1 << 0)
+
 static void ble_on_reset(int reason)
 {
     ESP_LOGE(TAG, "Resetting state; reason=%d\n", reason);
@@ -34,6 +38,23 @@ static void ble_on_sync(void)
     rc = ble_hs_util_ensure_addr(0);
     assert(rc == 0);
 
+    if (s_ble_sync_event_group) {
+        xEventGroupSetBits(s_ble_sync_event_group, BLE_SYNC_BIT);
+    }
+}
+
+bool ble_wait_for_sync(uint32_t timeout_ms)
+{
+    if (!s_ble_sync_event_group) {
+        return false;
+    }
+    EventBits_t bits = xEventGroupWaitBits(
+        s_ble_sync_event_group,
+        BLE_SYNC_BIT,
+        pdFALSE,
+        pdTRUE,
+        pdMS_TO_TICKS(timeout_ms));
+    return (bits & BLE_SYNC_BIT) != 0;
 }
 
 static void ble_host_task(void *param)
@@ -50,6 +71,10 @@ void initialize_bluetooth(void)
     esp_err_t ret;
 
     // assume NVS is already initialized in main (NimBLE neeeds it to store PHY calibration data)
+
+    if (!s_ble_sync_event_group) {
+        s_ble_sync_event_group = xEventGroupCreate();
+    }
 
     ret = nimble_port_init();
     if (ret != ESP_OK) {

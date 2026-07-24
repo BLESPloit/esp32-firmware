@@ -16,6 +16,11 @@ esp_err_t start_web_server(void);
 bool web_server_is_running(void);
 void init_simulation_state(void);
 
+const char *web_sim_get_device(void);
+void web_sim_start(const char *device_folder);
+void sim_autostart_set(bool enabled, const char *device_id);
+void sim_autostart_start_boot_task(void);
+
 
 // Broadcast a JSON string to all WebSocket clients and save to smart state
 // for replay on reconnect. Use this for any persistent UI element.

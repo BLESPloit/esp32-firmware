@@ -37,9 +37,12 @@ SemaphoreHandle_t device_central_mutex = NULL;
 
 // Initialize simulation state mutex
 void init_simulation_state(void) {
-    simulation_mutex = xSemaphoreCreateMutex();
-    device_central_mutex = xSemaphoreCreateMutex();
-    init_websocket_mutex();
+    if (simulation_mutex == NULL) {
+        simulation_mutex = xSemaphoreCreateMutex();
+    }
+    if (device_central_mutex == NULL) {
+        device_central_mutex = xSemaphoreCreateMutex();
+    }
 }
 
 esp_err_t httpd_index_page(httpd_req_t *req) {

@@ -47,6 +47,11 @@ typedef struct {
     config_param_t wifi_ap_ssid;
     config_param_t wifi_ap_psk;
     config_param_t wifi_mode_pref;
+
+    // peripheral sim auto-start on boot (NVS keys simauto / simdev / simfail)
+    config_param_t sim_autostart_enabled;
+    config_param_t sim_autostart_device;
+    config_param_t sim_autostart_fail_count;
 } device_config_t;
 
 
