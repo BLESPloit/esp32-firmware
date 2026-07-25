@@ -176,7 +176,7 @@ Distinct from relay **`seq`**, node **`src`/`dst`**, and UI element **`id`** on 
 | `status` | — | Broadcast `device_status` to all clients |
 | `scanner` | `action`: `start` (`connectable` bool), `stop`, `status`, `connect` | BLE scan control; `connect` uses `addr`, optional `read_values`, `pairing_mode`, `strategy`, `pin`, `save_result`, `open_central` |
 | `central` | `action`: `start` (`device`), `stop`, `status`, `menu_select` (`id`) | Central mode + UI delegation |
-| `sim` | `action`: `start` (`device`), `stop`, `status` | Peripheral simulation |
+| `sim` | `action`: `start` (`device`), `stop`, `status`, `autostart` (`enabled` bool, `device` when enabling) | Peripheral simulation; `stop` also disables auto-start for the stopped device |
 | `sim_button` | `id` | Runs Lua hook for simulated button |
 | `devices` | `action`: `list` | Broadcasts `devices_list` |
 | `system` | `action`: see **System (WS)** below | Reboot, memory, version |
@@ -329,7 +329,7 @@ REST equivalents: `POST /api/relay/connect`, `GET /api/relay/disconnect`.
 | `connection_progress` | Discovery / connection | `phase`, `status`, `addr`, `detail` |
 | `scan_discovery_result` | After connect + discover | `addr`, `rc`, `viable`, `services` |
 | `central_status` | Central start/stop | `status`, `device` |
-| `sim_status` | Simulation start/stop | `status`, `device`, optional `adv` |
+| `sim_status` | Simulation start/stop | `status`, `device`, optional `adv`, optional `autostart` (bool), `autostart_device` (string or null), `autostart_blocked` (bool) |
 | `devices_list` | List refresh | `devices` array |
 | `gfx` | Lua / graphics | `cmd`: `png`, `svg`, `background`, `color`, `text`, `notification`, `clear`, `remove` + layout fields |
 | `log` | wslog (`wslog_send`) after filter passes | `level`: `E` \| `W` \| `I`; `tag`; `msg` (quotes/newlines/backslashes sanitized). May include `src` like other broadcasts. |
