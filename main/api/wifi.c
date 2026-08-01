@@ -3,12 +3,13 @@
 #include <stdio.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/event_groups.h"
 #include "esp_mac.h"
 #include "esp_wifi.h"
 #include "esp_netif.h"
 #include "esp_event.h"
+#include "esp_timer.h"
 #include "esp_log.h"
+#include "spinlock.h"
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "cJSON.h"
@@ -18,16 +19,17 @@
 #include "api/usb_net.h"
 #include "api/wifi.h"
 
-#define WIFI_CONNECTED_BIT BIT0
-#define WIFI_FAIL_BIT      BIT1
 #define MAX_RETRY_ATTEMPTS 5
 #define RETRY_TIMEOUT_MS   30000  // 30 seconds total timeout
+#define WIFI_AP_FALLBACK_STACK 4096
 
 static const char *TAG = "wifi";
-static EventGroupHandle_t s_wifi_event_group;
 static int s_retry_num = 0;
 static bool s_sta_got_ip = false;
+static bool s_fallback_started = false;
 static bool s_ip_events_registered = false;
+static esp_timer_handle_t s_sta_fallback_timer = NULL;
+static portMUX_TYPE s_fallback_mux = portMUX_INITIALIZER_UNLOCKED;
 
 typedef struct {
     bool wifi_running;
@@ -46,6 +48,10 @@ static bool s_last_status_valid = false;
 
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                                int32_t event_id, void *event_data);
+static void start_ap_mode(void);
+static void wifi_cancel_sta_fallback_timer(void);
+static void wifi_arm_sta_fallback_timer(void);
+static void wifi_schedule_ap_fallback(const char *reason);
 
 extern device_config_t config;
 
@@ -588,7 +594,7 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
             ESP_LOGI(TAG, "Retry %d/%d connecting to AP", s_retry_num, MAX_RETRY_ATTEMPTS);
         } else {
             ESP_LOGI(TAG, "Failed to connect after %d attempts", MAX_RETRY_ATTEMPTS);
-            xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
+            wifi_schedule_ap_fallback("max retries");
             wifi_broadcast_status();
         }
         if (had_ip) {
@@ -598,6 +604,9 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
         ESP_LOGI(TAG, "Connected! IP: " IPSTR, IP2STR(&event->ip_info.ip));
+
+        s_sta_got_ip = true;
+        wifi_cancel_sta_fallback_timer();
 
         esp_err_t ps_err = esp_wifi_set_ps(WIFI_PS_NONE);
         if (ps_err != ESP_OK) {
@@ -611,8 +620,7 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
         disp_show_temp_label(ip_str, 10000);
 
         s_retry_num = 0;
-        s_sta_got_ip = true;
-        xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+        start_web_server();
         wifi_broadcast_status();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_STACONNECTED) {
         wifi_event_ap_staconnected_t* event = (wifi_event_ap_staconnected_t*) event_data;
@@ -680,10 +688,91 @@ static void wifi_init_common_ap_events(void)
                                                &wifi_event_handler, NULL));
 }
 
-static bool try_connect_sta(const char *ssid, const char *pass)
+static void wifi_cancel_sta_fallback_timer(void)
 {
-    s_wifi_event_group = xEventGroupCreate();
+    if (s_sta_fallback_timer != NULL) {
+        esp_timer_stop(s_sta_fallback_timer);
+    }
+}
+
+static void wifi_sta_fallback_timer_cb(void *arg)
+{
+    (void)arg;
+    wifi_schedule_ap_fallback("timeout");
+}
+
+static void wifi_arm_sta_fallback_timer(void)
+{
+    if (s_sta_fallback_timer == NULL) {
+        const esp_timer_create_args_t args = {
+            .callback = &wifi_sta_fallback_timer_cb,
+            .name = "wifi_sta_fb",
+        };
+        ESP_ERROR_CHECK(esp_timer_create(&args, &s_sta_fallback_timer));
+    }
+
+    wifi_cancel_sta_fallback_timer();
+    ESP_ERROR_CHECK(esp_timer_start_once(s_sta_fallback_timer,
+                                         (uint64_t)RETRY_TIMEOUT_MS * 1000ULL));
+}
+
+static void wifi_ap_fallback_worker(void *arg)
+{
+    (void)arg;
+
+    if (s_sta_got_ip) {
+        ESP_LOGI(TAG, "STA connected before AP fallback ran, skipping");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    portENTER_CRITICAL(&s_fallback_mux);
+    const bool still_need_fallback = !s_sta_got_ip;
+    portEXIT_CRITICAL(&s_fallback_mux);
+
+    if (!still_need_fallback) {
+        ESP_LOGI(TAG, "STA connected before AP fallback ran, skipping");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    start_ap_mode();
+    vTaskDelete(NULL);
+}
+
+static void wifi_schedule_ap_fallback(const char *reason)
+{
+    bool schedule = false;
+
+    portENTER_CRITICAL(&s_fallback_mux);
+    if (!s_sta_got_ip && !s_fallback_started) {
+        s_fallback_started = true;
+        schedule = true;
+    }
+    portEXIT_CRITICAL(&s_fallback_mux);
+
+    if (!schedule) {
+        return;
+    }
+
+    wifi_cancel_sta_fallback_timer();
+    ESP_LOGW(TAG, "STA connection failed (%s), falling back to AP mode", reason);
+
+    BaseType_t ok = xTaskCreate(wifi_ap_fallback_worker, "wifi_ap_fb",
+                                WIFI_AP_FALLBACK_STACK, NULL, 5, NULL);
+    if (ok != pdPASS) {
+        portENTER_CRITICAL(&s_fallback_mux);
+        s_fallback_started = false;
+        portEXIT_CRITICAL(&s_fallback_mux);
+        ESP_LOGE(TAG, "Failed to create AP fallback task");
+    }
+}
+
+static void start_sta_mode(const char *ssid, const char *pass)
+{
     s_retry_num = 0;
+    s_sta_got_ip = false;
+    s_fallback_started = false;
 
     esp_netif_create_default_wifi_sta();
 
@@ -702,23 +791,7 @@ static bool try_connect_sta(const char *ssid, const char *pass)
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
-                                           WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
-                                           pdFALSE,
-                                           pdFALSE,
-                                           pdMS_TO_TICKS(RETRY_TIMEOUT_MS));
-
-    if (bits & WIFI_CONNECTED_BIT) {
-        ESP_LOGI(TAG, "Connected to SSID: %s", ssid);
-        start_web_server();
-        return true;
-    }
-    if (bits & WIFI_FAIL_BIT) {
-        ESP_LOGI(TAG, "Failed to connect to SSID: %s", ssid);
-        return false;
-    }
-    ESP_LOGI(TAG, "Connection timeout");
-    return false;
+    wifi_arm_sta_fallback_timer();
 }
 
 void wifi_init_with_fallback(void)
@@ -740,9 +813,6 @@ void wifi_init_with_fallback(void)
         return;
     }
 
-    ESP_LOGI(TAG, "STA-first: attempting STA connection...");
-    if (!try_connect_sta(config.wifi_ssid.value.str, config.wifi_psk.value.str)) {
-        ESP_LOGW(TAG, "STA connection failed, falling back to AP mode");
-        start_ap_mode();
-    }
+    ESP_LOGI(TAG, "STA-first: starting STA (non-blocking)...");
+    start_sta_mode(config.wifi_ssid.value.str, config.wifi_psk.value.str);
 }
