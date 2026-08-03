@@ -16,6 +16,7 @@
 #include "ble/ble_scan.h"
 #include "hw/button.h"
 #include "hw/board.h"
+#include "hw/named_gpio.h"
 #include "hw/display.h"
 #include "api/console.h"
 #include "ble/device_parser.h"
@@ -25,6 +26,7 @@
 #include "common/utils.h"
 #include "api/web_server.h"
 #include "api/wifi.h"
+#include "api/usb_net.h"
 
 static const char *TAG = "main";
 
@@ -56,29 +58,37 @@ void app_main(void)
     display_init();
     lvgl_init();
 
-    // Initialize button manager
+    // Initialize button manager and named GPIOs
     ESP_ERROR_CHECK(button_init());
     ESP_ERROR_CHECK(board_register_buttons());
+    ESP_ERROR_CHECK(named_gpio_init());
+    ESP_ERROR_CHECK(board_register_named_gpios());
 
     log_memory_usage("after button");
 
     initialize_bluetooth();
     log_memory_usage("after initialize bluetooth");
 
+    init_simulation_state();
+    sim_autostart_start_boot_task();
+
    // Create default event loop (must be before http server)
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
+    ESP_ERROR_CHECK(esp_netif_init());
+
+    // WiFi before TinyUSB: esp_wifi_init() hangs if USB OTG stack is up first 
+    if (config.net_enabled.value.u8) {
+        wifi_init_with_fallback();
+    }
+
+    if (!config.usb_jtag_console.value.u8) {
+        ESP_ERROR_CHECK(usb_net_init());
+    }
     initialize_console();
 
     // initialize BLE scanning device mutex 
     ble_scanner_init();
-
-    if (config.net_enabled.value.u8) {
-        // Initialize TCP/IP stack 
-        ESP_ERROR_CHECK(esp_netif_init());
-
-        wifi_init_with_fallback();
-    }
 
     log_memory_usage("main end");
 

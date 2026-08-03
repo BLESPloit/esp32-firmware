@@ -1,10 +1,14 @@
 #include "esp_log.h"
 #include "nvs_flash.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/timers.h"
 
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "host/ble_hs.h"
 #include "host/ble_uuid.h"
+#include "host/ble_gatt.h"
+#include "host/ble_att.h"
 #include "host/util/util.h"
 #include "console/console.h"
 #include "services/gap/ble_svc_gap.h"
@@ -28,9 +32,136 @@ static discovery_context_t *central_ctx;
 static uint16_t central_conn_handle = BLE_HS_CONN_HANDLE_NONE;
 static char cached_device_id[64] = {0};
 static relay_pending_t g_relay_pending = {0};
+static TimerHandle_t s_central_post_connect_timer = NULL;
 
 static int ble_central_gap_event_handler(struct ble_gap_event *event, void *arg);
+void send_update_central_status_to_ws(const char *status);
 static relay_send_fn_t g_relay_send = websocket_broadcast_json_transient;
+
+static void central_on_ready(uint16_t conn_handle)
+{
+    send_update_central_status_to_ws("connected");
+    ble_lua_bridge_set_conn_handle(conn_handle);
+    lua_call_handler_async("on_connected", NULL);
+}
+
+static int central_mtu_exchange_cb(uint16_t conn_handle,
+                                   const struct ble_gatt_error *error,
+                                   uint16_t mtu, void *arg)
+{
+    uint16_t negotiated = ble_att_mtu(conn_handle);
+
+    if (error) {
+        ESP_LOGW(TAG, "MTU exchange failed: status=%d att_handle=0x%04x; continuing with mtu=%d",
+                 error->status, error->att_handle, negotiated);
+    } else {
+        ESP_LOGI(TAG, "MTU exchange complete; conn=0x%04x mtu=%d (cb mtu=%d)",
+                 conn_handle, negotiated, mtu);
+    }
+
+    if (conn_handle == central_conn_handle) {
+        central_on_ready(conn_handle);
+    }
+    return 0;
+}
+
+static void central_ensure_mtu(uint16_t conn_handle)
+{
+    if (conn_handle == BLE_HS_CONN_HANDLE_NONE) {
+        return;
+    }
+
+    uint16_t cur_mtu = ble_att_mtu(conn_handle);
+    if (cur_mtu > 23) {
+        ESP_LOGI(TAG, "MTU already %d on conn=0x%04x; skipping exchange", cur_mtu, conn_handle);
+        central_on_ready(conn_handle);
+        return;
+    }
+
+    ESP_LOGI(TAG, "Requesting ATT MTU exchange on conn=0x%04x (current=%d)", conn_handle, cur_mtu);
+    int rc = ble_gattc_exchange_mtu(conn_handle, central_mtu_exchange_cb, NULL);
+    if (rc != 0) {
+        ESP_LOGW(TAG, "ble_gattc_exchange_mtu failed: %d; continuing with default MTU", rc);
+        central_on_ready(conn_handle);
+    }
+}
+
+static void central_cancel_post_connect(void)
+{
+    if (s_central_post_connect_timer) {
+        xTimerStop(s_central_post_connect_timer, 0);
+    }
+}
+
+static void central_post_connect_timer_cb(TimerHandle_t xTimer)
+{
+    (void)xTimer;
+    uint16_t conn = central_conn_handle;
+    if (conn == BLE_HS_CONN_HANDLE_NONE) {
+        ESP_LOGW(TAG, "Central post-connect timer fired but no connection");
+        return;
+    }
+    ESP_LOGI(TAG, "Post-connect settle done; starting MTU on conn=0x%04x", conn);
+    central_ensure_mtu(conn);
+}
+
+// Defer ATT/MTU so the GAP callback can return and answer L2CAP updates. 
+static void central_schedule_post_connect(uint16_t conn_handle, uint32_t delay_ms)
+{
+    if (conn_handle == BLE_HS_CONN_HANDLE_NONE) {
+        return;
+    }
+
+    uint32_t ticks = pdMS_TO_TICKS(delay_ms > 0 ? delay_ms : 1);
+    if (ticks == 0) {
+        ticks = 1;
+    }
+
+    if (s_central_post_connect_timer == NULL) {
+        s_central_post_connect_timer = xTimerCreate("cent_pc", ticks, pdFALSE, NULL,
+                                                    central_post_connect_timer_cb);
+        if (s_central_post_connect_timer == NULL) {
+            ESP_LOGE(TAG, "Failed to create post-connect timer; starting MTU immediately");
+            central_ensure_mtu(conn_handle);
+            return;
+        }
+    } else {
+        xTimerStop(s_central_post_connect_timer, 0);
+    }
+
+    if (xTimerChangePeriod(s_central_post_connect_timer, ticks, 0) != pdPASS) {
+        ESP_LOGE(TAG, "Failed to arm post-connect timer; starting MTU immediately");
+        central_ensure_mtu(conn_handle);
+        return;
+    }
+
+    ESP_LOGI(TAG, "Scheduled post-connect MTU in %lu ms", (unsigned long)delay_ms);
+}
+
+static int central_handle_conn_update_req(struct ble_gap_event *event)
+{
+    const struct ble_gap_upd_params *peer = event->conn_update_req.peer_params;
+    struct ble_gap_upd_params *self = event->conn_update_req.self_params;
+    const char *kind = (event->type == BLE_GAP_EVENT_L2CAP_UPDATE_REQ)
+                           ? "L2CAP" : "LL";
+
+    if (peer) {
+        ESP_LOGI(TAG, "%s conn update req: itvl=%u-%u lat=%u tmo=%u",
+                 kind, peer->itvl_min, peer->itvl_max,
+                 peer->latency, peer->supervision_timeout);
+    } else {
+        ESP_LOGI(TAG, "%s conn update req", kind);
+    }
+
+    if (self && peer) {
+        *self = *peer;
+        if (self->supervision_timeout < BLE_CENTRAL_CONN_SUPERVISION_TIMEOUT) {
+            self->supervision_timeout = BLE_CENTRAL_CONN_SUPERVISION_TIMEOUT;
+        }
+    }
+
+    return 0; //accept immediately
+}
 
 // ── HELPERS ────────────────────────────────────────────────── 
 
@@ -300,8 +431,15 @@ esp_err_t ble_central_start_scanning(void)
 
     ESP_LOGI(TAG, "Start scanning...");
 
-    int rc = ble_gap_disc(BLE_OWN_ADDR_PUBLIC, BLE_HS_FOREVER,
-                         &disc_params, ble_central_gap_event_handler, NULL);
+    uint8_t own_addr_type;
+    int rc = ble_central_infer_own_addr_type(&own_addr_type);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "Failed to infer own addr type: %d", rc);
+        return ESP_FAIL;
+    }
+
+    rc = ble_gap_disc(own_addr_type, BLE_HS_FOREVER,
+                      &disc_params, ble_central_gap_event_handler, NULL);
     if (rc != 0) {
         ESP_LOGE(TAG, "Failed to start scan: %d", rc);
         return ESP_FAIL;
@@ -345,9 +483,7 @@ void ble_central_attach_from_discovery(uint16_t conn_handle,
 
     ble_gap_set_event_cb(conn_handle, ble_central_gap_event_handler, NULL);
 
-    send_update_central_status_to_ws("connected");
-    ble_lua_bridge_set_conn_handle(conn_handle);
-    lua_call_handler_async("on_connected", NULL);
+    central_ensure_mtu(conn_handle);
 }
 
 
@@ -423,6 +559,8 @@ void unload_ble_device_for_central(void) {
         return;
     }
 
+    central_cancel_post_connect();
+
     // Cancel ongoing operations (pending connect + scan)
     if (ble_gap_conn_active()) {
         ble_gap_conn_cancel();
@@ -492,19 +630,10 @@ int ble_central_connect(ble_addr_t *addr)
 
     vTaskDelay(pdMS_TO_TICKS(100));     
     
-    // Set connection parameters
-    conn_params.scan_itvl = 0x0010;
-    conn_params.scan_window = 0x0010;
-    conn_params.itvl_min = BLE_GAP_INITIAL_CONN_ITVL_MIN;
-    conn_params.itvl_max = BLE_GAP_INITIAL_CONN_ITVL_MAX;
-    conn_params.latency = 0;
-    conn_params.supervision_timeout = 0x0100;
-    conn_params.min_ce_len = 0;
-    conn_params.max_ce_len = 0;
+    ble_central_fill_conn_params(&conn_params);
 
     
-    // Figure out address to use
-    rc = ble_hs_id_infer_auto(0, &own_addr_type);
+    rc = ble_central_infer_own_addr_type(&own_addr_type);
     if (rc != 0) {
         ESP_LOGE(TAG, "error determining address type; rc=%d", rc);
         return ESP_FAIL;
@@ -932,10 +1061,7 @@ esp_err_t ble_central_reattach(uint16_t conn_handle)
     // Re-register central's GAP event handler (discovery may have taken it over)
     ble_gap_set_event_cb(conn_handle, ble_central_gap_event_handler, NULL);
 
-    // Notify client + Lua
-    send_update_central_status_to_ws("connected");
-    ble_lua_bridge_set_conn_handle(conn_handle);
-    lua_call_handler_async("on_connected", NULL);
+    central_ensure_mtu(conn_handle);
 
     return ESP_OK;
 }
@@ -976,12 +1102,11 @@ static int ble_central_gap_event_handler(struct ble_gap_event *event, void *arg)
             if (ble_gap_conn_find(central_conn_handle, &desc) == 0 && central_ctx) {
                 memcpy(&central_ctx->device_addr, &desc.peer_id_addr, sizeof(ble_addr_t));
                 central_ctx->conn_handle = central_conn_handle;
-            }  
+            }
 
-            send_update_central_status_to_ws("connected");
-            
-            ble_lua_bridge_set_conn_handle(event->connect.conn_handle);
-            lua_call_handler_async("on_connected", NULL);
+            // Return quickly so L2CAP Connection Parameter Update can be answered.
+            central_schedule_post_connect(event->connect.conn_handle,
+                                          BLE_CENTRAL_POST_CONNECT_SETTLE_MS);
 
         }
 
@@ -995,6 +1120,7 @@ static int ble_central_gap_event_handler(struct ble_gap_event *event, void *arg)
                     event->disconnect.conn.conn_handle, central_conn_handle);
             return 0;
         }
+        central_cancel_post_connect();
         central_conn_handle = BLE_HS_CONN_HANDLE_NONE;
         ble_lua_bridge_clear_conn_handle();
         send_update_central_status_to_ws("disconnected");
@@ -1003,14 +1129,15 @@ static int ble_central_gap_event_handler(struct ble_gap_event *event, void *arg)
 
     case BLE_GAP_EVENT_CONN_UPDATE:
         ESP_LOGI(TAG, "Connection updated; status=%d", event->conn_update.status);
-//        rc = ble_gap_conn_find(event->conn_update.conn_handle, &desc);
-//        if (rc == 0) {
-//            ble_print_conn_desc(&desc);
-//        }
         break;
-        
+
+    case BLE_GAP_EVENT_L2CAP_UPDATE_REQ:
     case BLE_GAP_EVENT_CONN_UPDATE_REQ:
-        ESP_LOGI(TAG, "Connection update request");
+        return central_handle_conn_update_req(event);
+
+    case BLE_GAP_EVENT_MTU:
+        ESP_LOGI(TAG, "GAP MTU update; conn=0x%04x mtu=%d",
+                 event->mtu.conn_handle, event->mtu.value);
         break;
         
     case BLE_GAP_EVENT_NOTIFY_RX:

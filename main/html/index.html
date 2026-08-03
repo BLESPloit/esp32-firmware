@@ -160,6 +160,106 @@
     .home-card .card-icon { font-size: 26px; line-height: 1; }
     .home-card .card-title { font-weight: 600; font-size: 15px; color: var(--color-text-heading); }
     .home-card .card-desc { font-size: 12px; color: var(--color-text-muted); line-height: 1.5; }
+    .home-card.home-card-static { cursor: default; }
+    .home-card.home-card-static:hover { transform: none; box-shadow: 0 2px 8px rgba(0,0,0,.07); }
+    .fw-btn-row { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
+    .fw-btn {
+      padding: 8px 10px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      border: 1px solid var(--color-border);
+      background: #f8fafc;
+      color: var(--color-text-heading);
+      text-align: left;
+    }
+    .fw-btn:hover { background: #eef2f7; }
+    .fw-btn.fw-btn-warn { border-color: #e67e22; color: #c0392b; background: #fff8f0; }
+    .fw-btn.fw-btn-warn:hover { background: #ffedd5; }
+
+    /* ── Nav reboot dropdown ── */
+    .nav-reboot-wrap { position: relative; }
+    .nav-dropdown {
+      display: none;
+      position: absolute;
+      top: calc(100% + 4px);
+      right: 0;
+      min-width: 200px;
+      background: #fff;
+      border: 1px solid var(--color-border);
+      border-radius: 8px;
+      box-shadow: 0 8px 24px rgba(0,0,0,.18);
+      padding: 4px;
+      z-index: 1100;
+    }
+    .nav-dropdown.open { display: block; }
+    .nav-dropdown button {
+      display: block;
+      width: 100%;
+      text-align: left;
+      padding: 8px 12px;
+      border: none;
+      background: none;
+      font-size: 13px;
+      color: #334155;
+      border-radius: 5px;
+      cursor: pointer;
+    }
+    .nav-dropdown button:hover { background: #f1f5f9; }
+    .nav-dropdown button.danger { color: #c0392b; }
+    .nav-dropdown .nd-hint {
+      font-size: 11px;
+      color: #64748b;
+      padding: 4px 12px 6px;
+      line-height: 1.35;
+      border-top: 1px solid #eee;
+      margin-top: 2px;
+    }
+
+    /* ── WiFi status panel (modal) ── */
+    .wifi-status-panel {
+      font-size: 12px;
+      color: #334155;
+      background: #f8fafc;
+      padding: 10px 12px;
+      border-radius: 8px;
+      border: 1px solid #e2e8f0;
+    }
+    .wifi-status-panel .wsp-title {
+      font-weight: 700;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+      color: #063049;
+      margin-bottom: 8px;
+    }
+    .wsp-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 3px 0;
+      line-height: 1.4;
+    }
+    .wsp-key { color: #64748b; flex-shrink: 0; }
+    .wsp-val { text-align: right; word-break: break-word; }
+    .wsp-refresh {
+      margin-top: 8px;
+      padding: 5px 10px;
+      font-size: 11px;
+      border: 1px solid #cbd5e1;
+      border-radius: 5px;
+      background: #fff;
+      cursor: pointer;
+      color: #475569;
+    }
+    .wsp-refresh:hover { background: #f1f5f9; }
+    .wifi-config-summary {
+      font-size: 12px;
+      color: #64748b;
+      line-height: 1.45;
+      padding: 0 2px;
+    }
 
     /* ── Auto-redirect banner ── */
     #auto-redirect-banner {
@@ -300,7 +400,7 @@
     <a href="#devices" class="nav-link"        data-page="devices" onclick="navigate('devices'); return false;">📋 Devices</a>
     <a href="#files"   class="nav-link"        data-page="files"   onclick="navigate('files');   return false;">🗂️ Files</a>
     <a href="#settings" class="nav-link" data-page="settings" onclick="openWifiModal(); return false;">⚙ Wifi settings</a>
-    <a href="#" class="nav-link" onclick="confirmReboot(); return false;" title="Reboot ESP32">🔄 Reboot</a>
+    <a href="#" class="nav-link" onclick="confirmReboot(); return false;" title="Reboot device">🔄 Reboot</a>
 
   </div>
 
@@ -352,6 +452,14 @@
       <div class="card-title">File Manager</div>
       <div class="card-desc">Browse and manage files on the ESP32 filesystem.</div>
     </div>
+    <div class="home-card home-card-static">
+      <div class="card-icon">🔧</div>
+      <div class="card-title">Device</div>
+      <div class="card-desc">Reboot the device. USB console mode (TinyUSB vs JTAG) is changed from the serial console only.</div>
+      <div class="fw-btn-row">
+        <button type="button" class="fw-btn" onclick="confirmReboot()">🔄 Reboot</button>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -376,10 +484,12 @@
         style="background:none;border:none;color:#fff;font-size:22px;cursor:pointer;line-height:1;">×</button>
     </div>
     <div style="padding:20px;display:flex;flex-direction:column;gap:14px;">
-      <div id="wifiCurrentSsid" style="font-size:13px;color:#555;background:#f8f8f8;
-           padding:8px 12px;border-radius:6px;border:1px solid #eee;">
-        Loading current SSID…
+      <div id="wifiStatusPanel" class="wifi-status-panel">
+        <div class="wsp-title">Runtime status</div>
+        <div id="wifiStatusContent">Loading…</div>
+        <button type="button" class="wsp-refresh" onclick="refreshWifiModalStatus()">↻ Refresh</button>
       </div>
+      <div id="wifiConfigSummary" class="wifi-config-summary">Loading saved config…</div>
       <label style="font-size:13px;font-weight:600;color:#333;">
         Preferred Wi‑Fi mode
         <select id="wifiMode"
@@ -674,6 +784,12 @@ function handleStatusMsg(msg) {
       break;
     }
 
+    case 'wifi_status':
+      if (wifiModal.style.display === 'flex' && msg.status) {
+        renderWifiStatusPanel(null, msg.status);
+      }
+      break;
+
     /* Generic unified status message (firmware convenience) */
     case 'status':
       if (msg.mode === 'scan')
@@ -695,26 +811,116 @@ function setPill(id, cls, active) {
 
 const wifiModal = document.getElementById('wifiModal');
 
+function escHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/"/g, '&quot;');
+}
+
+function renderWifiStatusPanel(cfg, st) {
+  const content = document.getElementById('wifiStatusContent');
+  if (!content) return;
+  if (!st) {
+    content.innerHTML = '<span style="color:#64748b">Status unavailable</span>';
+    return;
+  }
+
+  const rows = [];
+  rows.push(['WiFi driver', st.wifi_running ? st.active_mode : 'off']);
+
+  let wifiIp = st.current_ip || '—';
+  if ((!wifiIp || wifiIp === '(not connected)') && st.sta && st.sta.ip) {
+    wifiIp = st.sta.ip;
+  } else if ((!wifiIp || wifiIp === '(not connected)') && st.ap && st.ap.ip) {
+    wifiIp = st.ap.ip;
+  }
+  rows.push(['WiFi IP', wifiIp]);
+
+  const usb = st.usb || {};
+  rows.push(['USB IP', usb.ip || '—']);
+
+  if (st.primary_iface) rows.push(['WiFi iface', st.primary_iface]);
+
+  const sta = st.sta || {};
+  let staDetail = sta.up ? 'not connected' : 'down';
+  if (sta.connected) {
+    staDetail = `connected · ${sta.ssid || '?'} · ${sta.rssi} dBm`;
+    if (sta.ip) staDetail += ` · ${sta.ip}`;
+  }
+  rows.push(['STA', staDetail]);
+
+  const ap = st.ap || {};
+  const apDetail = ap.up
+    ? `up · ${ap.ssid_effective || '?'} · ${ap.ip || '—'} · ${ap.clients} client(s)`
+    : 'down';
+  rows.push(['Soft-AP', apDetail]);
+
+  let usbDetail = usb.up ? (usb.link_up ? 'link up' : 'link down') : 'down';
+  if (usb.up && usb.ip) usbDetail += ` · ${usb.ip}`;
+  rows.push(['USB NCM', usbDetail]);
+
+  rows.push(['HTTP server', st.http_server ? 'running' : 'stopped']);
+  if (cfg) rows.push(['WiFi at boot', cfg.enabled ? 'enabled' : 'disabled']);
+
+  content.innerHTML = rows.map(([k, v]) =>
+    `<div class="wsp-row"><span class="wsp-key">${escHtml(k)}</span><span class="wsp-val">${escHtml(v)}</span></div>`
+  ).join('');
+}
+
+function renderWifiConfigSummary(cfg) {
+  const el = document.getElementById('wifiConfigSummary');
+  if (!el) return;
+  if (!cfg) {
+    el.textContent = 'Saved config unavailable';
+    return;
+  }
+  const modeLabel = cfg.mode === 'ap_only' ? 'AP-only' : 'STA-first';
+  const staLine = cfg.ssid
+    ? `STA: ${cfg.ssid} (${cfg.has_psk ? 'password saved' : 'no password'})`
+    : 'STA: not configured';
+  el.textContent =
+    `Saved config · ${modeLabel} · ${staLine} · Soft-AP: ${cfg.ap_ssid_effective || '…'}${cfg.has_ap_psk ? ' (custom AP password)' : ''}`;
+}
+
+async function loadWifiModalData() {
+  const r = await fetch('/api/wifi');
+  const d = await r.json();
+  const cfg = d.config || d;
+  const st = d.status || null;
+  document.getElementById('wifiSsid').value = cfg.ssid || '';
+  document.getElementById('wifiMode').value = cfg.mode === 'ap_only' ? 'ap_only' : 'sta_first';
+  document.getElementById('wifiApSsid').value = cfg.ap_ssid || '';
+  renderWifiStatusPanel(cfg, st);
+  renderWifiConfigSummary(cfg);
+  return d;
+}
+
 async function openWifiModal() {
   wifiModal.style.display = 'flex';
   document.getElementById('wifiStatus').textContent = '';
   document.getElementById('wifiPsk').value = '';
   document.getElementById('wifiApPsk').value = '';
   document.getElementById('wifiApPskClear').checked = false;
+  document.getElementById('wifiStatusContent').textContent = 'Loading…';
+  document.getElementById('wifiConfigSummary').textContent = 'Loading saved config…';
   try {
-    const r = await fetch('/api/wifi');
-    const d = await r.json();
-    document.getElementById('wifiSsid').value = d.ssid || '';
-    document.getElementById('wifiMode').value = d.mode === 'ap_only' ? 'ap_only' : 'sta_first';
-    document.getElementById('wifiApSsid').value = d.ap_ssid || '';
-    const modeLabel = d.mode === 'ap_only' ? 'AP-only' : 'STA-first';
-    const staLine = d.ssid
-      ? `STA: ${d.ssid} (${d.has_psk ? 'password saved' : 'no password'})`
-      : 'STA: not configured';
-    document.getElementById('wifiCurrentSsid').textContent =
-      `${modeLabel} · ${staLine} · Soft-AP broadcast: ${d.ap_ssid_effective || '…'}${d.has_ap_psk ? ' (custom AP password)' : ''}`;
-  } catch(e) {
-    document.getElementById('wifiCurrentSsid').textContent = 'Could not load current settings';
+    await loadWifiModalData();
+  } catch (e) {
+    document.getElementById('wifiStatusContent').textContent = 'Could not load status';
+    document.getElementById('wifiConfigSummary').textContent = 'Could not load saved settings';
+  }
+}
+
+async function refreshWifiModalStatus() {
+  const btn = wifiModal.querySelector('.wsp-refresh');
+  if (btn) btn.disabled = true;
+  try {
+    await loadWifiModalData();
+  } catch (e) {
+    document.getElementById('wifiStatusContent').textContent = 'Refresh failed';
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -793,13 +999,22 @@ async function saveWifiAndReboot() {
   setTimeout(() => rebootDevice(), 2000);   
 }
 
+function setRebootFeedback(text) {
+  const el = document.getElementById('navWsStatus');
+  if (el) {
+    el.textContent = text;
+    el.classList.remove('ws-on');
+  }
+}
+
 function confirmReboot() {
   if (!confirm('Reboot the ESP32 now?')) return;
   rebootDevice();
-  // Briefly show feedback in the WS status badge
   const el = document.getElementById('navWsStatus');
-  el.textContent = 'Rebooting…';
-  el.classList.remove('ws-on');
+  if (el) {
+    el.textContent = 'Rebooting…';
+    el.classList.remove('ws-on');
+  }
 }
 
 // Shared reboot function (usable from modal and nav button)

@@ -37,9 +37,12 @@ SemaphoreHandle_t device_central_mutex = NULL;
 
 // Initialize simulation state mutex
 void init_simulation_state(void) {
-    simulation_mutex = xSemaphoreCreateMutex();
-    device_central_mutex = xSemaphoreCreateMutex();
-    init_websocket_mutex();
+    if (simulation_mutex == NULL) {
+        simulation_mutex = xSemaphoreCreateMutex();
+    }
+    if (device_central_mutex == NULL) {
+        device_central_mutex = xSemaphoreCreateMutex();
+    }
 }
 
 esp_err_t httpd_index_page(httpd_req_t *req) {
@@ -48,8 +51,17 @@ esp_err_t httpd_index_page(httpd_req_t *req) {
 
 // ── HTTPD start ────────────────────────────────────────────────── 
 
+bool web_server_is_running(void)
+{
+    return server != NULL;
+}
+
 esp_err_t start_web_server(void)
 {
+    if (server != NULL) {
+        return ESP_OK;
+    }
+
     int rc;
     static int handler_count = 0;
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();

@@ -118,9 +118,8 @@ void wslog_send(char level, const char *tag, const char *fmt, ...) {
 
 // ── GET /api/log/filter ────────────────────────────────────────────────── 
 
-static esp_err_t wslog_get_filter_handler(httpd_req_t *req) {
-    xSemaphoreTake(s_mutex, portMAX_DELAY);
-
+static cJSON *wslog_filter_to_json(void)
+{
     cJSON *root = cJSON_CreateObject();
     cJSON_AddBoolToObject(root, "enabled", s_filter.enabled);
     cJSON_AddBoolToObject(root, "info_enabled", s_filter.info_enabled);
@@ -128,6 +127,38 @@ static esp_err_t wslog_get_filter_handler(httpd_req_t *req) {
     cJSON *allowed = cJSON_AddArrayToObject(root, "allowed_info_tags");
     for (int i = 0; i < s_filter.allowed_info_tag_count; i++)
         cJSON_AddItemToArray(allowed, cJSON_CreateString(s_filter.allowed_info_tags[i]));
+    return root;
+}
+
+static void wslog_apply_filter_from_json(cJSON *json)
+{
+    cJSON *enabled = cJSON_GetObjectItem(json, "enabled");
+    if (cJSON_IsBool(enabled))
+        s_filter.enabled = cJSON_IsTrue(enabled);
+
+    cJSON *info_enabled = cJSON_GetObjectItem(json, "info_enabled");
+    if (cJSON_IsBool(info_enabled))
+        s_filter.info_enabled = cJSON_IsTrue(info_enabled);
+
+    cJSON *allowed = cJSON_GetObjectItem(json, "allowed_info_tags");
+    if (cJSON_IsArray(allowed)) {
+        s_filter.allowed_info_tag_count = 0;
+        cJSON *item = NULL;
+        cJSON_ArrayForEach(item, allowed) {
+            if (!cJSON_IsString(item)) continue;
+            if (s_filter.allowed_info_tag_count >= WSLOG_MAX_TAG_FILTERS) break;
+            strncpy(s_filter.allowed_info_tags[s_filter.allowed_info_tag_count],
+                    item->valuestring, WSLOG_TAG_LEN - 1);
+            s_filter.allowed_info_tags[s_filter.allowed_info_tag_count][WSLOG_TAG_LEN - 1] = '\0';
+            s_filter.allowed_info_tag_count++;
+        }
+    }
+}
+
+static esp_err_t wslog_get_filter_handler(httpd_req_t *req) {
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+
+    cJSON *root = wslog_filter_to_json();
 
     xSemaphoreGive(s_mutex);
 
@@ -162,27 +193,7 @@ static esp_err_t wslog_set_filter_handler(httpd_req_t *req) {
 
     xSemaphoreTake(s_mutex, portMAX_DELAY);
 
-    cJSON *enabled = cJSON_GetObjectItem(json, "enabled");
-    if (cJSON_IsBool(enabled))
-        s_filter.enabled = cJSON_IsTrue(enabled);
-
-    cJSON *info_enabled = cJSON_GetObjectItem(json, "info_enabled");
-    if (cJSON_IsBool(info_enabled))
-        s_filter.info_enabled = cJSON_IsTrue(info_enabled);
-
-    cJSON *allowed = cJSON_GetObjectItem(json, "allowed_info_tags");
-    if (cJSON_IsArray(allowed)) {
-        s_filter.allowed_info_tag_count = 0;
-        cJSON *item = NULL;
-        cJSON_ArrayForEach(item, allowed) {
-            if (!cJSON_IsString(item)) continue;
-            if (s_filter.allowed_info_tag_count >= WSLOG_MAX_TAG_FILTERS) break;
-            strncpy(s_filter.allowed_info_tags[s_filter.allowed_info_tag_count],
-                    item->valuestring, WSLOG_TAG_LEN - 1);
-            s_filter.allowed_info_tags[s_filter.allowed_info_tag_count][WSLOG_TAG_LEN - 1] = '\0';
-            s_filter.allowed_info_tag_count++;
-        }
-    }
+    wslog_apply_filter_from_json(json);
 
     xSemaphoreGive(s_mutex);
     cJSON_Delete(json);
@@ -201,29 +212,44 @@ static esp_err_t wslog_set_filter_handler(httpd_req_t *req) {
 static bool wslog_ws_handler(const char *type, cJSON *json) {
     if (strcmp(type, "log_filter") != 0) return false;
 
-    xSemaphoreTake(s_mutex, portMAX_DELAY);
-    cJSON *enabled = cJSON_GetObjectItem(json, "enabled");
-    if (cJSON_IsBool(enabled)) s_filter.enabled = cJSON_IsTrue(enabled);
+    cJSON *act = cJSON_GetObjectItemCaseSensitive(json, "action");
+    const char *action = cJSON_IsString(act) ? act->valuestring : NULL;
 
-    cJSON *info_enabled = cJSON_GetObjectItem(json, "info_enabled");
-    if (cJSON_IsBool(info_enabled)) s_filter.info_enabled = cJSON_IsTrue(info_enabled);
-
-    cJSON *allowed = cJSON_GetObjectItem(json, "allowed_info_tags");
-    if (cJSON_IsArray(allowed)) {
-        s_filter.allowed_info_tag_count = 0;
-        cJSON *item = NULL;
-        cJSON_ArrayForEach(item, allowed) {
-            if (!cJSON_IsString(item)) continue;
-            if (s_filter.allowed_info_tag_count >= WSLOG_MAX_TAG_FILTERS) break;
-            strncpy(s_filter.allowed_info_tags[s_filter.allowed_info_tag_count++],
-                    item->valuestring, WSLOG_TAG_LEN - 1);
+    if (action && strcmp(action, "get") == 0) {
+        xSemaphoreTake(s_mutex, portMAX_DELAY);
+        cJSON *root = wslog_filter_to_json();
+        xSemaphoreGive(s_mutex);
+        cJSON_AddStringToObject(root, "type", "log_filter_response");
+        ws_json_echo_req_id(root, json);
+        char *str = cJSON_PrintUnformatted(root);
+        cJSON_Delete(root);
+        if (str) {
+            websocket_broadcast_json_transient(str);
+            free(str);
         }
+        return true;
     }
+
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    wslog_apply_filter_from_json(json);
     xSemaphoreGive(s_mutex);
 
-    // Broadcast confirmed state back to all clients    
-    // (reuse the GET handler logic, or factor it into wslog_broadcast_filter())
-    ESP_LOGI(TAG, "Filter updated via WS");
+    cJSON *req_id = cJSON_GetObjectItemCaseSensitive(json, "req_id");
+    if (cJSON_IsNumber(req_id) || cJSON_IsString(req_id)) {
+        xSemaphoreTake(s_mutex, portMAX_DELAY);
+        cJSON *root = wslog_filter_to_json();
+        xSemaphoreGive(s_mutex);
+        cJSON_AddStringToObject(root, "type", "log_filter_response");
+        ws_json_echo_req_id(root, json);
+        char *str = cJSON_PrintUnformatted(root);
+        cJSON_Delete(root);
+        if (str) {
+            websocket_broadcast_json_transient(str);
+            free(str);
+        }
+    } else {
+        ESP_LOGI(TAG, "Filter updated via WS");
+    }
     return true;
 }
 

@@ -2,10 +2,13 @@
 #include "esp_littlefs.h"
 #include "esp_wifi.h"
 #include "esp_log.h"
+#include "mbedtls/base64.h"
 #include <dirent.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <errno.h>
+#include <string.h>
+#include <stdlib.h>
 #include "cJSON.h"
 #include "common/storage.h"
 #include "common/utils.h"
@@ -13,6 +16,54 @@
 #include "api/web_server.h"
 
 static const char *TAG = "web server filemanager";
+
+#define FS_WS_CHUNK_RAW 384
+
+typedef struct {
+    bool     active;
+    FILE    *file;
+    char     fullpath[256];
+    size_t   bytes_written;
+} fs_ws_write_session_t;
+
+static fs_ws_write_session_t s_fs_write = {0};
+
+static void fs_ws_write_abort(void)
+{
+    if (s_fs_write.file) {
+        fclose(s_fs_write.file);
+        s_fs_write.file = NULL;
+        if (s_fs_write.fullpath[0]) {
+            unlink(s_fs_write.fullpath);
+        }
+    }
+    s_fs_write.active = false;
+    s_fs_write.bytes_written = 0;
+    s_fs_write.fullpath[0] = '\0';
+}
+
+typedef struct {
+    bool   active;
+    FILE  *file;
+    int    next_seq;
+} fs_ws_read_session_t;
+
+static fs_ws_read_session_t s_fs_read     = {0};
+static cJSON               *s_fs_read_req = NULL;
+
+static void fs_ws_read_abort(void)
+{
+    if (s_fs_read.file) {
+        fclose(s_fs_read.file);
+        s_fs_read.file = NULL;
+    }
+    if (s_fs_read_req) {
+        cJSON_Delete(s_fs_read_req);
+        s_fs_read_req = NULL;
+    }
+    s_fs_read.active   = false;
+    s_fs_read.next_seq = 0;
+}
 
 // ── Helpers ────────────────────────────────────────────────── 
 
@@ -593,10 +644,13 @@ static int write_fs_file(const char *fullpath, const char *data, size_t len) {
     ({ cJSON *_v = cJSON_GetObjectItemCaseSensitive(j, key); \
        cJSON_IsString(_v) ? _v->valuestring : NULL; })
 
-static char *fs_ws_response(const char *cmd, cJSON *payload, const char *error) {
+static char *fs_ws_response(const char *cmd, cJSON *payload, const char *error,
+                            const cJSON *request)
+{
     cJSON *resp = cJSON_CreateObject();
     cJSON_AddStringToObject(resp, "type", "fs_response");
     cJSON_AddStringToObject(resp, "cmd",  cmd ? cmd : "?");
+    ws_json_echo_req_id(resp, request);
     if (error) {
         cJSON_AddStringToObject(resp, "error", error);
     } else {
@@ -610,6 +664,235 @@ static char *fs_ws_response(const char *cmd, cJSON *payload, const char *error) 
     char *s = cJSON_PrintUnformatted(resp);
     cJSON_Delete(resp);
     return s;
+}
+
+static void fs_ws_broadcast_str(char *json_str)
+{
+    if (!json_str) return;
+    websocket_broadcast_json_transient(json_str);
+    free(json_str);
+}
+
+static void fs_ws_send_chunk(const char *cmd, const cJSON *request,
+                             int seq, bool eof, const char *b64)
+{
+    cJSON *j = cJSON_CreateObject();
+    cJSON_AddStringToObject(j, "type", "fs_chunk");
+    cJSON_AddStringToObject(j, "cmd", cmd);
+    cJSON_AddNumberToObject(j, "seq", seq);
+    cJSON_AddBoolToObject(j, "eof", eof);
+    cJSON_AddStringToObject(j, "data", b64 ? b64 : "");
+    ws_json_echo_req_id(j, request);
+    char *s = cJSON_PrintUnformatted(j);
+    cJSON_Delete(j);
+    fs_ws_broadcast_str(s);
+}
+
+static bool fs_ws_req_id_matches(const cJSON *json, const cJSON *stored_req)
+{
+    if (!stored_req) return true;
+    cJSON *a = cJSON_GetObjectItemCaseSensitive(json, "req_id");
+    cJSON *b = cJSON_GetObjectItemCaseSensitive(stored_req, "req_id");
+    if (!a && !b) return true;
+    if (!a || !b) return false;
+    if (cJSON_IsNumber(a) && cJSON_IsNumber(b))
+        return cJSON_GetNumberValue(a) == cJSON_GetNumberValue(b);
+    if (cJSON_IsString(a) && cJSON_IsString(b))
+        return strcmp(a->valuestring, b->valuestring) == 0;
+    return false;
+}
+
+static cJSON *s_fs_write_req = NULL;
+
+static bool fs_ws_handle_read_start(const char *cmd, const char *path, const cJSON *json)
+{
+    // Always abort any stale session first (idempotent)
+    fs_ws_read_abort();
+
+    char fullpath[256];
+    build_full_path(fullpath, sizeof(fullpath), path);
+
+    struct stat st;
+    if (stat(fullpath, &st) != 0 || S_ISDIR(st.st_mode)) {
+        fs_ws_broadcast_str(fs_ws_response(cmd, NULL, "Not a file", json));
+        return true;
+    }
+
+    FILE *f = fopen(fullpath, "rb");
+    if (!f) {
+        fs_ws_broadcast_str(fs_ws_response(cmd, NULL, "Open failed", json));
+        return true;
+    }
+
+    s_fs_read.active   = true;
+    s_fs_read.file     = f;
+    s_fs_read.next_seq = 0;
+    s_fs_read_req      = cJSON_Duplicate(json, true);
+
+    cJSON *meta = cJSON_CreateObject();
+    cJSON_AddNumberToObject(meta, "size", (double)st.st_size);
+    fs_ws_broadcast_str(fs_ws_response(cmd, meta, NULL, json));
+    cJSON_Delete(meta);
+    return true;
+}
+
+static bool fs_ws_handle_read_chunk(const char *cmd, const cJSON *json)
+{
+    if (!s_fs_read.active || !s_fs_read.file) {
+        fs_ws_broadcast_str(fs_ws_response(cmd, NULL, "No active read", json));
+        return true;
+    }
+    if (!fs_ws_req_id_matches(json, s_fs_read_req)) {
+        fs_ws_broadcast_str(fs_ws_response(cmd, NULL, "req_id mismatch", json));
+        return true;
+    }
+
+    // Optional seq validation: reject out-of-order requests
+    cJSON *seq_obj = cJSON_GetObjectItemCaseSensitive(json, "seq");
+    if (cJSON_IsNumber(seq_obj) && (int)seq_obj->valuedouble != s_fs_read.next_seq) {
+        fs_ws_broadcast_str(fs_ws_response(cmd, NULL, "seq out of order", json));
+        return true;
+    }
+
+    unsigned char raw[FS_WS_CHUNK_RAW];
+    size_t n = fread(raw, 1, sizeof(raw), s_fs_read.file);
+
+    // Short read (including n==0 for empty file) always means end-of-file
+    bool eof = (n < FS_WS_CHUNK_RAW);
+
+    if (n == 0) {
+        // Empty file or read past end — send empty terminal chunk
+        fs_ws_send_chunk("read", s_fs_read_req, s_fs_read.next_seq, true, "");
+        fs_ws_read_abort();
+        return true;
+    }
+
+    unsigned char b64[520];
+    size_t b64_len;
+    if (mbedtls_base64_encode(b64, sizeof(b64), &b64_len, raw, n) != 0) {
+        fs_ws_broadcast_str(fs_ws_response(cmd, NULL, "Encode failed", json));
+        fs_ws_read_abort();
+        return true;
+    }
+    b64[b64_len] = '\0';
+
+    fs_ws_send_chunk("read", s_fs_read_req, s_fs_read.next_seq, eof, (char *)b64);
+
+    if (eof) {
+        fs_ws_read_abort();
+    } else {
+        s_fs_read.next_seq++;
+    }
+    return true;
+}
+
+static bool fs_ws_handle_write_start(const char *cmd, const char *path, const cJSON *json)
+{
+    if (s_fs_write.active) {
+        fs_ws_broadcast_str(fs_ws_response(cmd, NULL, "Write already active", json));
+        return true;
+    }
+    char fullpath[256];
+    build_full_path(fullpath, sizeof(fullpath), path);
+
+    FILE *f = fopen(fullpath, "wb");
+    if (!f) {
+        fs_ws_broadcast_str(fs_ws_response(cmd, NULL, "Open failed", json));
+        return true;
+    }
+
+    s_fs_write.active = true;
+    s_fs_write.file = f;
+    s_fs_write.bytes_written = 0;
+    strncpy(s_fs_write.fullpath, fullpath, sizeof(s_fs_write.fullpath) - 1);
+    s_fs_write.fullpath[sizeof(s_fs_write.fullpath) - 1] = '\0';
+
+    if (s_fs_write_req) {
+        cJSON_Delete(s_fs_write_req);
+        s_fs_write_req = NULL;
+    }
+    s_fs_write_req = cJSON_Duplicate(json, true);
+
+    cJSON *meta = cJSON_CreateObject();
+    cJSON *size_obj = cJSON_GetObjectItemCaseSensitive(json, "size");
+    if (cJSON_IsNumber(size_obj))
+        cJSON_AddNumberToObject(meta, "size", cJSON_GetNumberValue(size_obj));
+    fs_ws_broadcast_str(fs_ws_response(cmd, meta, NULL, json));
+    cJSON_Delete(meta);
+    return true;
+}
+
+static bool fs_ws_handle_write_chunk(const char *cmd, const cJSON *json)
+{
+    if (!s_fs_write.active || !s_fs_write.file) {
+        fs_ws_broadcast_str(fs_ws_response(cmd, NULL, "No active write", json));
+        return true;
+    }
+    if (!fs_ws_req_id_matches(json, s_fs_write_req)) {
+        fs_ws_broadcast_str(fs_ws_response(cmd, NULL, "req_id mismatch", json));
+        return true;
+    }
+
+    cJSON *data_obj = cJSON_GetObjectItemCaseSensitive(json, "data");
+    if (!cJSON_IsString(data_obj)) {
+        fs_ws_write_abort();
+        fs_ws_broadcast_str(fs_ws_response(cmd, NULL, "Missing data", json));
+        return true;
+    }
+
+    unsigned char chunk[FS_WS_CHUNK_RAW + 4];
+    size_t out_len = 0;
+    if (mbedtls_base64_decode(chunk, sizeof(chunk), &out_len,
+                              (const unsigned char *)data_obj->valuestring,
+                              strlen(data_obj->valuestring)) != 0) {
+        fs_ws_write_abort();
+        fs_ws_broadcast_str(fs_ws_response(cmd, NULL, "Base64 decode failed", json));
+        return true;
+    }
+
+    size_t written = fwrite(chunk, 1, out_len, s_fs_write.file);
+    if (written != out_len) {
+        fs_ws_write_abort();
+        fs_ws_broadcast_str(fs_ws_response(cmd, NULL, "Write failed", json));
+        return true;
+    }
+    s_fs_write.bytes_written += written;
+
+    cJSON *ack = cJSON_CreateObject();
+    cJSON_AddNumberToObject(ack, "bytes", (double)s_fs_write.bytes_written);
+    fs_ws_broadcast_str(fs_ws_response(cmd, ack, NULL, json));
+    cJSON_Delete(ack);
+    return true;
+}
+
+static bool fs_ws_handle_write_end(const char *cmd, const cJSON *json)
+{
+    if (!s_fs_write.active || !s_fs_write.file) {
+        fs_ws_broadcast_str(fs_ws_response(cmd, NULL, "No active write", json));
+        return true;
+    }
+    if (!fs_ws_req_id_matches(json, s_fs_write_req)) {
+        fs_ws_broadcast_str(fs_ws_response(cmd, NULL, "req_id mismatch", json));
+        return true;
+    }
+
+    fclose(s_fs_write.file);
+    s_fs_write.file = NULL;
+    s_fs_write.active = false;
+
+    cJSON *done = cJSON_CreateObject();
+    cJSON_AddNumberToObject(done, "bytes", (double)s_fs_write.bytes_written);
+    cJSON_AddStringToObject(done, "path", s_fs_write.fullpath);
+    fs_ws_broadcast_str(fs_ws_response(cmd, done, NULL, json));
+    cJSON_Delete(done);
+
+    s_fs_write.fullpath[0] = '\0';
+    s_fs_write.bytes_written = 0;
+    if (s_fs_write_req) {
+        cJSON_Delete(s_fs_write_req);
+        s_fs_write_req = NULL;
+    }
+    return true;
 }
 
 static bool fs_ws_handler(const char *type, cJSON *json) {
@@ -637,7 +920,7 @@ static bool fs_ws_handler(const char *type, cJSON *json) {
         cJSON_AddStringToObject(result, "path", path);
         cJSON *arr = cJSON_AddArrayToObject(result, "entries");
         ls_dir_into_array(fullpath, path, arr, recursive);
-        resp_str = fs_ws_response(cmd, result, NULL);
+        resp_str = fs_ws_response(cmd, result, NULL, json);
         cJSON_Delete(result);
 
     } else if (strcmp(cmd, "df") == 0) {
@@ -647,7 +930,7 @@ static bool fs_ws_handler(const char *type, cJSON *json) {
         cJSON_AddNumberToObject(result, "total_bytes", (double)total);
         cJSON_AddNumberToObject(result, "used_bytes",  (double)used);
         cJSON_AddNumberToObject(result, "free_bytes",  (double)(total-used));
-        resp_str = fs_ws_response(cmd, result, NULL);
+        resp_str = fs_ws_response(cmd, result, NULL, json);
         cJSON_Delete(result);
 
     } else if (strcmp(cmd, "exists") == 0) {
@@ -664,7 +947,7 @@ static bool fs_ws_handler(const char *type, cJSON *json) {
         } else {
             cJSON_AddBoolToObject(result, "exists", false);
         }
-        resp_str = fs_ws_response(cmd, result, NULL);
+        resp_str = fs_ws_response(cmd, result, NULL, json);
         cJSON_Delete(result);
 
     } else if (strcmp(cmd, "mkdir") == 0) {
@@ -672,23 +955,23 @@ static bool fs_ws_handler(const char *type, cJSON *json) {
         if (!path || strstr(path, "..")) goto bad_path;
         build_full_path(fullpath, sizeof(fullpath), path);
         if (mkdir_p(fullpath) != 0)
-            resp_str = fs_ws_response(cmd, NULL, strerror(errno));
-        else { cJSON *r = cJSON_CreateObject(); resp_str = fs_ws_response(cmd, r, NULL); cJSON_Delete(r); }
+            resp_str = fs_ws_response(cmd, NULL, strerror(errno), json);
+        else { cJSON *r = cJSON_CreateObject(); resp_str = fs_ws_response(cmd, r, NULL, json); cJSON_Delete(r); }
     } else if (strcmp(cmd, "delete") == 0) {
         const char *path = FS_GET_STR(json, "path");
         if (!path || strstr(path, "..")) goto bad_path;
         build_full_path(fullpath, sizeof(fullpath), path);
         int rc = is_directory(fullpath) ? rmdir(fullpath) : unlink(fullpath);
-        if (rc != 0) resp_str = fs_ws_response(cmd, NULL, strerror(errno));
-        else { cJSON *r = cJSON_CreateObject(); resp_str = fs_ws_response(cmd, r, NULL); cJSON_Delete(r); }
+        if (rc != 0) resp_str = fs_ws_response(cmd, NULL, strerror(errno), json);
+        else { cJSON *r = cJSON_CreateObject(); resp_str = fs_ws_response(cmd, r, NULL, json); cJSON_Delete(r); }
 
     } else if (strcmp(cmd, "rmdir") == 0) {
         const char *path = FS_GET_STR(json, "path");
         if (!path || strstr(path, "..")) goto bad_path;
         build_full_path(fullpath, sizeof(fullpath), path);
         if (rmdir_recursive(fullpath) != 0)
-            resp_str = fs_ws_response(cmd, NULL, strerror(errno));
-        else { cJSON *r = cJSON_CreateObject(); resp_str = fs_ws_response(cmd, r, NULL); cJSON_Delete(r); }
+            resp_str = fs_ws_response(cmd, NULL, strerror(errno), json);
+        else { cJSON *r = cJSON_CreateObject(); resp_str = fs_ws_response(cmd, r, NULL, json); cJSON_Delete(r); }
 
     } else if (strcmp(cmd, "rename") == 0) {
         const char *from = FS_GET_STR(json, "from");
@@ -697,17 +980,44 @@ static bool fs_ws_handler(const char *type, cJSON *json) {
 // don't check for ".." in rename (allows to move file up)
 //        if (!from || !to || strstr(from, "..") || strstr(to, "..")) goto bad_path;
         if (!from || !to) goto bad_path;
-    
+
+        build_full_path(fullpath, sizeof(fullpath), from);
+        build_full_path(fullpath2, sizeof(fullpath2), to);
+
         if (rename(fullpath, fullpath2) != 0)
-            resp_str = fs_ws_response(cmd, NULL, strerror(errno));
-        else { cJSON *r = cJSON_CreateObject(); resp_str = fs_ws_response(cmd, r, NULL); cJSON_Delete(r); }
+            resp_str = fs_ws_response(cmd, NULL, strerror(errno), json);
+        else { cJSON *r = cJSON_CreateObject(); resp_str = fs_ws_response(cmd, r, NULL, json); cJSON_Delete(r); }
+
+    } else if (strcmp(cmd, "read_start") == 0) {
+        const char *path = FS_GET_STR(json, "path");
+        if (!path || strstr(path, "..")) goto bad_path;
+        fs_ws_handle_read_start(cmd, path, json);
+        goto done;
+
+    } else if (strcmp(cmd, "read_chunk") == 0) {
+        fs_ws_handle_read_chunk(cmd, json);
+        goto done;
+
+    } else if (strcmp(cmd, "write_start") == 0) {
+        const char *path = FS_GET_STR(json, "path");
+        if (!path || strstr(path, "..")) goto bad_path;
+        fs_ws_handle_write_start(cmd, path, json);
+        goto done;
+
+    } else if (strcmp(cmd, "write_chunk") == 0) {
+        fs_ws_handle_write_chunk(cmd, json);
+        goto done;
+
+    } else if (strcmp(cmd, "write_end") == 0) {
+        fs_ws_handle_write_end(cmd, json);
+        goto done;
 
     } else if (strcmp(cmd, "patch") == 0) {
         const char *path = FS_GET_STR(json, "path");
         cJSON *patch_obj = cJSON_GetObjectItemCaseSensitive(json, "patch");
         if (!path || strstr(path, "..")) goto bad_path;
         if (!cJSON_IsObject(patch_obj)) {
-            resp_str = fs_ws_response(cmd, NULL, "Missing 'patch' object");
+            resp_str = fs_ws_response(cmd, NULL, "Missing 'patch' object", json);
             goto done;
         }
         build_full_path(fullpath, sizeof(fullpath), path);
@@ -721,21 +1031,21 @@ static bool fs_ws_handler(const char *type, cJSON *json) {
         cJSON_Delete(base);
         if (!out || write_fs_file(fullpath, out, strlen(out)) != 0) {
             free(out);
-            resp_str = fs_ws_response(cmd, NULL, "Write failed");
+            resp_str = fs_ws_response(cmd, NULL, "Write failed", json);
         } else {
             free(out);
             cJSON *r = cJSON_CreateObject();
-            resp_str = fs_ws_response(cmd, r, NULL);
+            resp_str = fs_ws_response(cmd, r, NULL, json);
             cJSON_Delete(r);
         }
 
     } else {
-        resp_str = fs_ws_response(cmd, NULL, "Unknown command");
+        resp_str = fs_ws_response(cmd, NULL, "Unknown command", json);
     }
     goto done;
 
 bad_path:
-    resp_str = fs_ws_response(cmd, NULL, "Invalid path");
+    resp_str = fs_ws_response(cmd, NULL, "Invalid path", json);
 
 done:
     if (resp_str) {

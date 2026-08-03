@@ -13,6 +13,7 @@ typedef enum {
     LUA_EVENT_CALL_HANDLER,      // Call handler with string parameter
     LUA_EVENT_CALL_FUNCTION,     // Call function with binary data
     LUA_EVENT_DELAYED_CALL,      // Call function after a predefined delay
+    LUA_EVENT_SHUTDOWN,          // Close lua_State and exit lua_task
 } lua_event_type_t;
 
 // Event structure

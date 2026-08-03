@@ -32,6 +32,10 @@
           <div class="controls">
             <button class="btn btn-primary" id="btnStart">Start Simulation</button>
             <button class="btn btn-danger"  id="btnStop" disabled>Stop Simulation</button>
+            <label class="debug-toggle" style="margin-left:12px;" title="Start this device automatically after reboot">
+              <input type="checkbox" id="chkAutostart">
+              Auto-start on boot
+            </label>
           </div>
 
           <div class="canvas-wrapper">
@@ -278,7 +282,7 @@ function drawPNG(id, path, align, x, y, w, h) {
     const img   = new Image();
     img.onload  = () => { imageCache[path] = img; perform(); addEspLog('I', 'canvas', `PNG loaded: ${path}`); };
     img.onerror = () => addEspLog('E', 'canvas', `Failed to load PNG: ${path}`);
-    img.src = path;
+    img.src = path.startsWith('/static/') ? path : '/static/' + path;
   }
 }
 
@@ -299,7 +303,8 @@ function drawSvg(id, svgPath, align, x, y, w, color = null) {
   };
   if (svgCache[svgPath]) perform();
   else {
-    fetch(svgPath)
+    const svgUrl = svgPath.startsWith('/static/') ? svgPath : '/static/' + svgPath;
+    fetch(svgUrl)
       .then(r => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.text();
@@ -491,6 +496,7 @@ function handleWsMessage(cmd) {
       break;
 
     case 'sim_status':
+      syncAutostartFromStatus(cmd);
       if (cmd.status === 'started') {
         activateSimulationUI(cmd.device);
         renderAdvData(cmd.adv);
@@ -520,6 +526,27 @@ function startSimulation(id) {
 
 function stopSimulation() {
   wsSend({ type: 'sim', action: 'stop' });
+}
+
+function syncAutostartFromStatus(cmd) {
+  const chk = document.getElementById('chkAutostart');
+  if (!chk) return;
+  const enabled = cmd.autostart === true
+    && cmd.autostart_device
+    && deviceId
+    && cmd.autostart_device === deviceId;
+  chk.checked = enabled;
+  if (cmd.autostart_blocked) {
+    addEspLog('W', 'sim', 'Auto-start disabled after repeated boot failures — re-enable the checkbox to retry');
+  }
+}
+
+function setAutostart(enabled) {
+  if (!deviceId) {
+    addEspLog('E', 'sim', 'Cannot set auto-start: no device ID');
+    return;
+  }
+  wsSend({ type: 'sim', action: 'autostart', enabled, device: deviceId });
 }
 
 function activateSimulationUI(deviceName) {
@@ -560,6 +587,7 @@ function setStatus(label) {
 // ─────────────────────────────────────────────
 document.getElementById('btnStart').addEventListener('click', () => { if (deviceId) startSimulation(deviceId); });
 document.getElementById('btnStop').addEventListener('click',  stopSimulation);
+document.getElementById('chkAutostart').addEventListener('change', (e) => setAutostart(e.target.checked));
 
 // ─────────────────────────────────────────────
 // Init

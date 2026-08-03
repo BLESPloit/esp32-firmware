@@ -60,6 +60,9 @@ typedef bool (*ws_message_handler_fn_t)(const char *type, cJSON *json);
 
 void ws_register_message_handler(ws_message_handler_fn_t fn);
 
+/** Copy req_id from request into response when present (number or string). */
+void ws_json_echo_req_id(cJSON *response, const cJSON *request);
+
 // getters
 const char *web_central_get_device(void);
 const char *web_sim_get_device(void);

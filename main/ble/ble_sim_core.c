@@ -1,5 +1,6 @@
 #include "esp_log.h"
 #include "nvs_flash.h"
+#include "sdkconfig.h"
 
 
 #include "nimble/nimble_port.h"
@@ -24,6 +25,44 @@
 
 static const char *TAG = "BLE sim - core";
 
+#ifndef CONFIG_BT_NIMBLE_MAX_EXT_ADV_INSTANCES
+#define CONFIG_BT_NIMBLE_MAX_EXT_ADV_INSTANCES 4
+#endif
+
+static bool s_ble_sim_teardown = false;
+
+bool ble_sim_teardown_active(void) { return s_ble_sim_teardown; }
+void ble_sim_set_teardown(bool active) { s_ble_sim_teardown = active; }
+
+void ble_sim_stop_all_ext_adv(void)
+{
+    for (int i = 0; i < CONFIG_BT_NIMBLE_MAX_EXT_ADV_INSTANCES; i++) {
+        int rc = ble_gap_ext_adv_stop(i);
+        if (rc != 0 && rc != BLE_HS_EALREADY && rc != BLE_HS_EINVAL && rc != BLE_HS_ENOENT) {
+            WS_LOGW(TAG, "ble_gap_ext_adv_stop(%d) rc=%d", i, rc);
+        }
+    }
+}
+
+void ble_sim_clear_ext_adv_sets(void)
+{
+    int rc = ble_gap_ext_adv_clear();
+    if (rc == BLE_HS_EBUSY) {
+        ble_sim_stop_all_ext_adv();
+        vTaskDelay(pdMS_TO_TICKS(200));
+        rc = ble_gap_ext_adv_clear();
+    }
+    if (rc != 0 && rc != BLE_HS_EALREADY) {
+        WS_LOGW(TAG, "ble_gap_ext_adv_clear rc=%d — trying per-instance remove", rc);
+        for (int i = 0; i < CONFIG_BT_NIMBLE_MAX_EXT_ADV_INSTANCES; i++) {
+            int rm = ble_gap_ext_adv_remove(i);
+            if (rm != 0 && rm != BLE_HS_EALREADY && rm != BLE_HS_ENOENT) {
+                WS_LOGW(TAG, "ble_gap_ext_adv_remove(%d) rc=%d", i, rm);
+            }
+        }
+    }
+}
+
 // forward declarations
 void ble_store_config_init(void);
 esp_err_t stop_ble_simulation(void);
@@ -37,7 +76,7 @@ esp_err_t start_ble_simulation(void) {
     int rc;
 
     // Stop any active advertising/connections first
-    ble_gap_ext_adv_stop(0);
+    ble_sim_stop_all_ext_adv();
 
     struct ble_gap_conn_desc desc;
     for (int i = 0; i < CONFIG_BT_NIMBLE_MAX_CONNECTIONS; i++) {
@@ -230,6 +269,8 @@ esp_err_t load_ble_device_for_simulation(const char *device_id) {
 
 esp_err_t stop_ble_simulation(void) {
     int rc = 0;
+
+    ble_sim_set_teardown(true);
     
     ESP_LOGI(TAG, "Stopping BLE simulation...");
     
@@ -240,9 +281,8 @@ esp_err_t stop_ble_simulation(void) {
             if (rc != 0 && rc != BLE_HS_EALREADY)
                 WS_LOGW(TAG, "Failed to stop adv instance %d: %d", i, rc);
         }
-    } else {
-        rc = ble_gap_ext_adv_stop(0); // safe fallback before adv_set is populated
     }
+    ble_sim_stop_all_ext_adv();
 
     if (rc == BLE_HS_EALREADY) {
         ESP_LOGI(TAG, "Advertising already stopped");
@@ -299,6 +339,8 @@ esp_err_t stop_ble_simulation(void) {
         ble_gap_adv_stop();
         vTaskDelay(pdMS_TO_TICKS(200));
     }
+
+    ble_sim_clear_ext_adv_sets();
     
     if (ble_gap_disc_active()) {
         ESP_LOGI(TAG, "Discovery active, cancelling...");
@@ -321,9 +363,11 @@ esp_err_t stop_ble_simulation(void) {
             rc = ble_gatts_reset();
             if (rc != 0) {
                 WS_LOGE(TAG, "GATT reset still failed after retry: %d", rc);
+                ble_sim_set_teardown(false);
                 return ESP_ERR_INVALID_STATE;
             }
         } else {
+            ble_sim_set_teardown(false);
             return ESP_FAIL;
         }
     }
@@ -331,6 +375,8 @@ esp_err_t stop_ble_simulation(void) {
     ESP_LOGI(TAG, "GATT database reset successful");
 
     free_ble_server(&ble_server);
+
+    ble_sim_set_teardown(false);
     
     ESP_LOGI(TAG, "BLE simulation stopped and memory cleared");
     

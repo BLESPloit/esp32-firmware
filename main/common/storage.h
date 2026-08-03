@@ -33,7 +33,11 @@ typedef struct {
 
 // Main device configuration struct
 typedef struct {
+    // NVS key "net": WiFi enabled at boot (USB NCM is always initialized separately). 
     config_param_t net_enabled;
+
+    // NVS key "usbjtag": true = USB Serial/JTAG console at boot; false = TinyUSB CDC + NCM. 
+    config_param_t usb_jtag_console;
 
     // wifi STA credentials
     config_param_t wifi_ssid;
@@ -43,6 +47,11 @@ typedef struct {
     config_param_t wifi_ap_ssid;
     config_param_t wifi_ap_psk;
     config_param_t wifi_mode_pref;
+
+    // peripheral sim auto-start on boot (NVS keys simauto / simdev / simfail)
+    config_param_t sim_autostart_enabled;
+    config_param_t sim_autostart_device;
+    config_param_t sim_autostart_fail_count;
 } device_config_t;
 
 

@@ -7,6 +7,7 @@ file(GLOB BASE_SRCS
     "graphics/websocket_gfx.c"
     "hw/button.c"
     "hw/board.c"
+    "hw/named_gpio.c"
     "interface/*.c"
     "lua/*.c"
     "main.c"
@@ -36,4 +37,9 @@ idf_component_register(
     SRCS ${BASE_SRCS} ${DISPLAY_SRC} ${LVGL_SRCS}
     INCLUDE_DIRS "."
     EMBED_FILES ${HTML_FILES}
+    REQUIRES app_update bt console driver esp_event 
+             esp_http_server esp_hw_support esp_lcd 
+             esp_netif esp_pm esp_timer esp_wifi  
+             nvs_flash mbedtls 
+    PRIV_REQUIRES esp_driver_usb_serial_jtag json espressif__esp_tinyusb
 )

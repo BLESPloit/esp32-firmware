@@ -17,6 +17,7 @@
 #include "lua/lua_ble_bridge.h"
 #include "lua/lua_crypto.h"
 #include "lua/lua_gfx.h"
+#include "lua/lua_gpio.h"
 #include "lua/lua_hook.h"
 
 #define TAG "LUA"
@@ -318,6 +319,19 @@ static void lua_task(void* arg) {
                     }
                     break;
                 }
+
+                case LUA_EVENT_SHUTDOWN: {
+                    ESP_LOGI(TAG, "Lua shutdown requested");
+                    if (g_lua_state) {
+                        lua_close(g_lua_state);
+                        g_lua_state = NULL;
+                    }
+                    if (event.done_sem) {
+                        xSemaphoreGive(event.done_sem);
+                    }
+                    vTaskDelete(NULL);
+                    break;
+                }
             }
         }
     }
@@ -507,6 +521,9 @@ esp_err_t lua_init_persistent_minimal(const char *script_path, bool central,
   
     // Register cryptographic functions
     lua_crypto_register_functions(g_lua_state);
+
+    // Register named GPIO functions (central + peripheral)
+    lua_gpio_register_functions(g_lua_state);
 
     // Register utility functions
     lua_register(g_lua_state, "bin_to_hex", lua_bin_to_hex);
@@ -707,23 +724,43 @@ esp_err_t lua_call_from_field(const char *src)
 // ── Cleanup ────────────────────────────────────────────────── 
 
 void lua_cleanup(void) {
-    if (lua_task_handle) {
-        vTaskDelete(lua_task_handle);
+    if (lua_task_handle && lua_event_queue) {
+        SemaphoreHandle_t done = xSemaphoreCreateBinary();
+        if (done) {
+            lua_event_t event = {0};
+            event.type = LUA_EVENT_SHUTDOWN;
+            event.done_sem = done;
+            if (xQueueSend(lua_event_queue, &event, portMAX_DELAY) == pdTRUE) {
+                xSemaphoreTake(done, portMAX_DELAY);
+            } else {
+                ESP_LOGW(TAG, "Lua shutdown queue send failed, forcing task delete");
+                vTaskDelete(lua_task_handle);
+                if (g_lua_state) {
+                    lua_close(g_lua_state);
+                    g_lua_state = NULL;
+                }
+            }
+            vSemaphoreDelete(done);
+        }
         lua_task_handle = NULL;
+    } else {
+        if (lua_task_handle) {
+            vTaskDelete(lua_task_handle);
+            lua_task_handle = NULL;
+        }
+        if (g_lua_state) {
+            lua_close(g_lua_state);
+            g_lua_state = NULL;
+        }
     }
-    
+
     if (lua_event_queue) {
         vQueueDelete(lua_event_queue);
         lua_event_queue = NULL;
     }
-    
-    if (g_lua_state) {
-        lua_close(g_lua_state);
-        g_lua_state = NULL;
-    }
-    
+
     crypto_deinit();
-    
+
     ESP_LOGI(TAG, "Lua cleanup complete");
 }
 

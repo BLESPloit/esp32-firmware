@@ -2,7 +2,7 @@
 #include "cJSON.h"
 #include "host/ble_gatt.h"
 
-#define MAX_SCANNED_DEVICES 50
+#define MAX_SCANNED_DEVICES 200
 #define MAX_SCANNED_ADV_DATA_LEN 64
 #define MAX_SCANNED_SCAN_RESP_DATA_LEN 31
 #define BLE_SCAN_DURATION_MS 30000

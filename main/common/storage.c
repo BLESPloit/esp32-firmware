@@ -45,6 +45,26 @@ device_config_t config = {
             .value.u8 = WIFI_MODE_PREF_STA_FIRST,
             .type = CONFIG_TYPE_UINT8,
             .nvs_name = "wifimode"
+        },
+        .usb_jtag_console = {
+            .value.u8 = false,
+            .type = CONFIG_TYPE_BOOL,
+            .nvs_name = "usbjtag"
+        },
+        .sim_autostart_enabled = {
+            .value.u8 = false,
+            .type = CONFIG_TYPE_BOOL,
+            .nvs_name = "simauto"
+        },
+        .sim_autostart_device = {
+            .value.str = NULL,
+            .type = CONFIG_TYPE_STR,
+            .nvs_name = "simdev"
+        },
+        .sim_autostart_fail_count = {
+            .value.u8 = 0,
+            .type = CONFIG_TYPE_UINT8,
+            .nvs_name = "simfail"
         }
     };
 
@@ -298,6 +318,14 @@ esp_err_t write_config_nvs(void)
     if (err != ESP_OK) goto error;
     err = save_param_to_nvs(handle, &config.wifi_mode_pref, false);
     if (err != ESP_OK) goto error;
+    err = save_param_to_nvs(handle, &config.usb_jtag_console, false);
+    if (err != ESP_OK) goto error;
+    err = save_param_to_nvs(handle, &config.sim_autostart_enabled, false);
+    if (err != ESP_OK) goto error;
+    err = save_param_to_nvs(handle, &config.sim_autostart_device, false);
+    if (err != ESP_OK) goto error;
+    err = save_param_to_nvs(handle, &config.sim_autostart_fail_count, false);
+    if (err != ESP_OK) goto error;
 
     // Commit written value.
     // After setting any values, nvs_commit() must be called to ensure changes are written to flash storage. 
@@ -435,6 +463,38 @@ esp_err_t read_config_nvs(void)
         ESP_LOGW(TAG, "Invalid wifi mode %u, resetting to STA-first", config.wifi_mode_pref.value.u8);
         config.wifi_mode_pref.value.u8 = WIFI_MODE_PREF_STA_FIRST;
         err = save_param_to_nvs(handle, &config.wifi_mode_pref, false);
+        if (err != ESP_OK)
+            return err;
+        write_commit_needed = true;
+    }
+
+    err = load_param_from_nvs(handle, &config.usb_jtag_console);
+    if (err != ESP_OK) {
+        config.usb_jtag_console.value.u8 = false;
+        err = save_param_to_nvs(handle, &config.usb_jtag_console, false);
+        if (err != ESP_OK)
+            return err;
+        write_commit_needed = true;
+    }
+
+    err = load_param_from_nvs(handle, &config.sim_autostart_enabled);
+    if (err != ESP_OK) {
+        config.sim_autostart_enabled.value.u8 = false;
+        err = save_param_to_nvs(handle, &config.sim_autostart_enabled, false);
+        if (err != ESP_OK)
+            return err;
+        write_commit_needed = true;
+    }
+
+    err = load_param_from_nvs(handle, &config.sim_autostart_device);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Sim autostart device not set");
+    }
+
+    err = load_param_from_nvs(handle, &config.sim_autostart_fail_count);
+    if (err != ESP_OK) {
+        config.sim_autostart_fail_count.value.u8 = 0;
+        err = save_param_to_nvs(handle, &config.sim_autostart_fail_count, false);
         if (err != ESP_OK)
             return err;
         write_commit_needed = true;
