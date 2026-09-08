@@ -771,7 +771,20 @@ int ble_sim_gap_event(struct ble_gap_event *event, void *arg)
         break;
 
     case BLE_GAP_EVENT_PHY_UPDATE_COMPLETE:
-        WS_LOGI(TAG, "PHY update complete");
+        WS_LOGI(TAG, "PHY update; status=%d conn=0x%04x tx=%s rx=%s",
+                 event->phy_updated.status,
+                 event->phy_updated.conn_handle,
+                 get_phy_name(event->phy_updated.tx_phy),
+                 get_phy_name(event->phy_updated.rx_phy));
+        return 0;
+
+    case BLE_GAP_EVENT_DATA_LEN_CHG:
+        WS_LOGI(TAG, "Data length; conn=0x%04x tx=%u/%u rx=%u/%u",
+                 event->data_len_chg.conn_handle,
+                 event->data_len_chg.max_tx_octets,
+                 event->data_len_chg.max_tx_time,
+                 event->data_len_chg.max_rx_octets,
+                 event->data_len_chg.max_rx_time);
         return 0;
 
     // SMP / Security events

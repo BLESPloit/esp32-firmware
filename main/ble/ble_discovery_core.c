@@ -108,7 +108,7 @@ static int discovery_mtu_exchange_cb(uint16_t conn_handle,
     discovery_context_t *ctx = (discovery_context_t *)arg;
     uint16_t negotiated = ble_att_mtu(conn_handle);
 
-    if (error) {
+    if (error && error->status != 0) {
         ESP_LOGW(TAG, "MTU exchange failed: status=%d att_handle=0x%04x; continuing with mtu=%d",
                  error->status, error->att_handle, negotiated);
     } else {
@@ -948,6 +948,23 @@ static int ble_discovery_gap_event_handler(struct ble_gap_event *event, void *ar
 
     case BLE_GAP_EVENT_NOTIFY_RX:
         ESP_LOGI(TAG, "Notification; handle=0x%04x", event->notify_rx.attr_handle);
+        break;
+
+    case BLE_GAP_EVENT_PHY_UPDATE_COMPLETE:
+        ESP_LOGI(TAG, "PHY update; status=%d conn=0x%04x tx=%s rx=%s",
+                 event->phy_updated.status,
+                 event->phy_updated.conn_handle,
+                 get_phy_name(event->phy_updated.tx_phy),
+                 get_phy_name(event->phy_updated.rx_phy));
+        break;
+
+    case BLE_GAP_EVENT_DATA_LEN_CHG:
+        ESP_LOGI(TAG, "Data length; conn=0x%04x tx=%u/%u rx=%u/%u",
+                 event->data_len_chg.conn_handle,
+                 event->data_len_chg.max_tx_octets,
+                 event->data_len_chg.max_tx_time,
+                 event->data_len_chg.max_rx_octets,
+                 event->data_len_chg.max_rx_time);
         break;
 
     // dispatch SMP/security related events to _smp.c 
