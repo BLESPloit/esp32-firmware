@@ -15,6 +15,7 @@
 
 #include "ble/ble_discovery.h"
 #include "ble/ble_scan.h"
+#include "ble/ble_central.h"
 #include "common/utils.h"
 #include "api/web_server.h"
 #include "api/web_server_internal.h"
@@ -235,6 +236,11 @@ void web_scan_dump_all(void) {
 // before the save/handoff branch.
 void web_scan_broadcast_discovery_result(discovery_context_t *ctx, int rc)
 {
+    web_scan_broadcast_discovery_result_ex(ctx, rc, false);
+}
+
+void web_scan_broadcast_discovery_result_ex(discovery_context_t *ctx, int rc, bool cached)
+{
     if (!ctx) return;
 
     cJSON *msg = cJSON_CreateObject();
@@ -249,6 +255,9 @@ void web_scan_broadcast_discovery_result(discovery_context_t *ctx, int rc)
     cJSON_AddNumberToObject(msg, "rc", rc);
     cJSON_AddBoolToObject(msg, "viable",
         ctx->services != NULL && ctx->phase >= DISC_PHASE_DESCRIPTORS);
+    if (cached) {
+        cJSON_AddBoolToObject(msg, "cached", true);
+    }
 
     // Always called after build_services_json() — json_services is populated
     if (ctx->json_services)
@@ -283,15 +292,19 @@ static bool scanner_ws_handler(const char *type, cJSON *json) {
         cJSON *j_central = cJSON_GetObjectItem(json, "open_central");
 
         if (cJSON_IsString(j_addr)) {
+            bool open_central = cJSON_IsBool(j_central) ? cJSON_IsTrue(j_central) : false;
             web_scan_connect(
                 j_addr->valuestring,
                 cJSON_IsBool(j_save)    ? cJSON_IsTrue(j_save)    : false,
-                cJSON_IsBool(j_central) ? cJSON_IsTrue(j_central) : false,
+                open_central,
                 cJSON_IsBool(j_read)    ? cJSON_IsTrue(j_read)    : false,
                 cJSON_IsNumber(j_mode)  ? (pairing_mode_t)j_mode->valueint          : PAIRING_MODE_NONE,
                 cJSON_IsNumber(j_strat) ? (pairing_strategy_t)j_strat->valueint     : PAIRING_STRATEGY_LEGACY_JUST_WORKS,
                 cJSON_IsNumber(j_pin)   ? (uint32_t)j_pin->valueint                 : 123456
             );
+            if (open_central) {
+                ble_central_smp_apply_json(json);
+            }
         }
     }
     return true;

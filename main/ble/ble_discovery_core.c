@@ -293,6 +293,44 @@ static uint16_t find_existing_conn_to_addr(const ble_addr_t *target_addr)
     return conn_handle;
 }
 
+static int disconnect_and_prepare_gap(void)
+{
+    int rc;
+
+    if (discovery_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+        ESP_LOGI(TAG, "Disconnecting existing connection to different device...");
+        rc = ble_gap_terminate(discovery_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+        if (rc == 0) {
+            vTaskDelay(pdMS_TO_TICKS(500));
+        }
+        discovery_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+    }
+
+    if (ble_gap_conn_active()) {
+        ESP_LOGW(TAG, "GAP connection already active, cancelling...");
+        g_cancelling_for_reconnect = true;
+        rc = ble_gap_conn_cancel();
+        if (rc != 0 && rc != BLE_HS_EALREADY && rc != BLE_HS_EDONE) {
+            ESP_LOGE(TAG, "Failed to cancel active connection: %d", rc);
+            g_cancelling_for_reconnect = false;
+        } else {
+            ESP_LOGI(TAG, "Active connection cancelled (rc=%d)", rc);
+            vTaskDelay(pdMS_TO_TICKS(300));
+        }
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
+
+    rc = ble_gap_disc_cancel();
+    if (rc != 0 && rc != BLE_HS_EALREADY && rc != BLE_HS_EDONE) {
+        ESP_LOGW(TAG, "Failed to cancel scan: rc=%d", rc);
+    } else if (rc != 0) {
+        ESP_LOGD(TAG, "Scan cancel returned rc=%d (not scanning, ok)", rc);
+    }
+    set_ble_scanning(false);
+    vTaskDelay(pdMS_TO_TICKS(150));
+    return 0;
+}
+
 // ── Discovery context management ────────────────────────────────────────────────── 
 // shared with ble_central
 discovery_context_t* create_discovery_context(uint16_t conn_handle, 
@@ -506,6 +544,7 @@ void discovery_complete(discovery_context_t *ctx, int rc)
         // callback may immediately start using the connection.
         g_disc_ctx              = NULL;
         discovery_conn_handle   = BLE_HS_CONN_HANDLE_NONE;
+        ble_sm_set_pairing_rsp_cb(NULL, NULL);
 
         // ctx ownership transfers to callee; do NOT destroy or disconnect.
         completing = false;
@@ -522,6 +561,7 @@ void discovery_complete(discovery_context_t *ctx, int rc)
     // that follows cannot reach a dangling context pointer.
     destroy_discovery_context(ctx);
     g_disc_ctx = NULL;
+    ble_sm_set_pairing_rsp_cb(NULL, NULL);
 
     if (discovery_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
         ESP_LOGI(TAG, "Disconnecting...");
@@ -540,10 +580,16 @@ int ble_connect_and_discover(const char *addr_str, bool save_result, bool open_c
     struct ble_gap_conn_params conn_params = {0};
 
     int id = find_device_by_addr(addr_str);
-    
-    // Check device ID
-    if (id >= scanned_device_count) {
-        ESP_LOGE(TAG, "Device ID %d out of range (have %d devices)", id, scanned_device_count);
+    ble_addr_t target_addr;
+
+    if (id >= 0 && id < scanned_device_count && scanned_devices[id].valid) {
+        target_addr.type = scanned_devices[id].addr_type;
+        memcpy(target_addr.val, scanned_devices[id].addr, 6);
+    } else if (ble_central_cache_resolve_addr_str(addr_str, &target_addr)) {
+        ESP_LOGI(TAG, "Device %s resolved from central GATT cache (not in scan table)", addr_str);
+        id = 0;
+    } else {
+        ESP_LOGE(TAG, "Device not found: %s", addr_str);
         return ESP_FAIL;
     }
     
@@ -559,11 +605,6 @@ int ble_connect_and_discover(const char *addr_str, bool save_result, bool open_c
         ESP_LOGW(TAG, "Invalid PIN %lu, using default 123456", (unsigned long)pin);
         pin = 123456;
     }
-
-    // Build target address early so we can query GAP
-    ble_addr_t target_addr;
-    target_addr.type = scanned_devices[id].addr_type;
-    memcpy(target_addr.val, scanned_devices[id].addr, 6);
 
     // Check if already connected to the same device (even if handle was handed off)
     uint16_t existing_handle = find_existing_conn_to_addr(&target_addr);
@@ -582,7 +623,7 @@ int ble_connect_and_discover(const char *addr_str, bool save_result, bool open_c
                 temp_ctx->save_json_on_complete = false;
                 memcpy(&temp_ctx->device_addr, &target_addr, sizeof(ble_addr_t));
                 build_services_json(temp_ctx);
-                web_scan_broadcast_discovery_result(temp_ctx, 0);
+                web_scan_broadcast_discovery_result_ex(temp_ctx, 0, true);
                 temp_ctx->services = NULL;  // detach before destroy
                 destroy_discovery_context(temp_ctx);
             }
@@ -614,49 +655,30 @@ int ble_connect_and_discover(const char *addr_str, bool save_result, bool open_c
         return 0;
     }
 
+    if (open_central && ble_central_cache_matches_addr(&target_addr)) {
+        ESP_LOGI(TAG, "Central GATT cache hit — reconnecting without discovery");
+
+        disconnect_and_prepare_gap();
+
+        if (g_disc_ctx) {
+            destroy_discovery_context(g_disc_ctx);
+            g_disc_ctx = NULL;
+        }
+
+        ble_central_request_discovery_broadcast_on_ready();
+        rc = ble_central_connect(&target_addr);
+        return (rc == 0) ? 0 : ESP_FAIL;
+    }
+
     // Not connected to this device — check for a different active connection and disconnect it first
     // TBD: handle multiple connections simultaneously?
-    if (discovery_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
-        ESP_LOGI(TAG, "Disconnecting existing connection to different device...");
-        rc = ble_gap_terminate(discovery_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
-        if (rc == 0) {
-            vTaskDelay(pdMS_TO_TICKS(500));
-        }
-        discovery_conn_handle = BLE_HS_CONN_HANDLE_NONE;
-    }
-
-    // Cancel ongoing connection attempt
-    if (ble_gap_conn_active()) {
-        ESP_LOGW(TAG, "GAP connection already active, cancelling...");
-        g_cancelling_for_reconnect = true;
-        rc = ble_gap_conn_cancel();
-        if (rc != 0 && rc != BLE_HS_EALREADY && rc != BLE_HS_EDONE) {
-            ESP_LOGE(TAG, "Failed to cancel active connection: %d", rc);
-            g_cancelling_for_reconnect = false; 
-        } else {
-            ESP_LOGI(TAG, "Active connection cancelled (rc=%d)", rc);
-            vTaskDelay(pdMS_TO_TICKS(300)); // give GAP time to deliver the event (GAP_EVENT_CONNECT with status = 0x09)
-        }
-        vTaskDelay(pdMS_TO_TICKS(200)); // give more time for GAP state to clear
-    }
-
-    // Stop scan — treat EDONE and EALREADY as non-errors
-    rc = ble_gap_disc_cancel();
-    if (rc != 0 && rc != BLE_HS_EALREADY && rc != BLE_HS_EDONE) {
-        ESP_LOGW(TAG, "Failed to cancel scan: rc=%d", rc);
-    } else if (rc != 0) {
-        ESP_LOGD(TAG, "Scan cancel returned rc=%d (not scanning, ok)", rc);
-    }
-    set_ble_scanning(false);
-
-    vTaskDelay(pdMS_TO_TICKS(150));
+    disconnect_and_prepare_gap();
     
     ble_central_fill_conn_params(&conn_params);
     
     // Prepare target address
     ble_addr_t addr;
-    addr.type = scanned_devices[id].addr_type;
-    memcpy(addr.val, scanned_devices[id].addr, 6);
+    addr = target_addr;
     
     if (g_disc_ctx) {
         destroy_discovery_context(g_disc_ctx);

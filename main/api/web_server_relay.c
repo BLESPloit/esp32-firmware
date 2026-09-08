@@ -326,6 +326,65 @@ static void relay_ws_send_response(const char *action, const char *status, const
     }
 }
 
+static void smp_ws_send_response(const char *action, const char *status, const cJSON *request)
+{
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddStringToObject(resp, "type", "smp");
+    cJSON_AddStringToObject(resp, "event", action ? action : "unknown");
+    cJSON_AddStringToObject(resp, "action", action ? action : "unknown");
+    cJSON_AddStringToObject(resp, "status", status ? status : "failed");
+    ws_json_echo_req_id(resp, request);
+    char *str = cJSON_PrintUnformatted(resp);
+    cJSON_Delete(resp);
+    if (str) {
+        websocket_broadcast_json_transient(str);
+        free(str);
+    }
+}
+
+static bool smp_ws_handler(const char *type, cJSON *json)
+{
+    if (strcmp(type, "smp") != 0) return false;
+
+    cJSON *act = cJSON_GetObjectItemCaseSensitive(json, "action");
+    const char *action = cJSON_IsString(act) ? act->valuestring : NULL;
+    if (!action) return true;
+
+    if (strcmp(action, "pair_config") == 0) {
+        ble_central_smp_apply_json(json);
+        smp_ws_send_response("pair_config", "ok", json);
+        return true;
+    }
+
+    if (strcmp(action, "pair") == 0) {
+        int rc = ble_central_smp_initiate(ble_central_conn_handle());
+        smp_ws_send_response("pair", rc == 0 ? "ok" : "failed", json);
+        return true;
+    }
+
+    if (strcmp(action, "pair_io") == 0) {
+        cJSON *j_conn = cJSON_GetObjectItemCaseSensitive(json, "conn_handle");
+        cJSON *j_pk = cJSON_GetObjectItemCaseSensitive(json, "passkey");
+        cJSON *j_acc = cJSON_GetObjectItemCaseSensitive(json, "accept");
+        cJSON *j_can = cJSON_GetObjectItemCaseSensitive(json, "cancel");
+        uint16_t conn = cJSON_IsNumber(j_conn) ? (uint16_t)j_conn->valueint
+                                               : ble_central_conn_handle();
+        bool cancel = cJSON_IsTrue(j_can);
+        int rc = ble_central_smp_pair_io(
+            conn,
+            cJSON_IsNumber(j_pk),
+            cJSON_IsNumber(j_pk) ? (uint32_t)j_pk->valueint : 0,
+            cJSON_IsBool(j_acc),
+            cJSON_IsTrue(j_acc),
+            cancel);
+        smp_ws_send_response("pair_io", rc == 0 ? "ok" : "failed", json);
+        return true;
+    }
+
+    ESP_LOGW(TAG, "smp: unknown action '%s'", action);
+    return true;
+}
+
 static bool relay_ws_handler(const char *type, cJSON *json) {
     if (strcmp(type, "relay") != 0) return false;
 
@@ -438,6 +497,7 @@ uint8_t register_relay_handlers_in_web_server(httpd_handle_t *server)
     uint8_t handler_count = 0;
 
     ws_register_message_handler(relay_ws_handler);
+    ws_register_message_handler(smp_ws_handler);
 
     httpd_uri_t uri_ws_relay_connect = {
         .uri = "/api/relay/connect",

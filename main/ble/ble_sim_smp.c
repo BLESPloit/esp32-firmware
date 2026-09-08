@@ -23,40 +23,56 @@ static const char *TAG = "BLE sim - SMP";
 extern device_config_t config; // storage.c
 extern ble_server_t *ble_server;
 
-// helper to get text description of pairing errors
-// shared with ble_discovery
-const char* get_pairing_error_string(int status) {
-    // Security Manager (peer) errors - base 0x500
-    if (status >= 0x500 && status < 0x600) {
-        switch (status - 0x500) {
-            case 0x01: return "SM: Passkey entry failed";
-            case 0x02: return "SM: OOB not available";
-            case 0x03: return "SM: Authentication requirements";
-            case 0x04: return "SM: Confirm value failed";
-            case 0x05: return "SM: Pairing not supported";
-            case 0x06: return "SM: Encryption key size";
-            case 0x07: return "SM: Command not supported";
-            case 0x08: return "SM: Unspecified reason";
-            case 0x09: return "SM: Repeated attempts";
-            case 0x0A: return "SM: Invalid parameters";
-            case 0x0B: return "SM: DHKey check failed";
-            case 0x0C: return "SM: Numeric comparison failed";
-            case 0x0D: return "SM: BR/EDR pairing in progress";
-            case 0x0E: return "SM: Cross-transport key derivation not allowed";
-            default: return "SM: Unknown error";
-        }
+// PAIRING_COMPLETE.status is a raw BLE_SM_ERR_* reason (0x00-0x0F).
+// ENC_CHANGE.status is a host code (BLE_HS_*, or 0x400/0x500 + SM reason).
+static const char *sm_reason_string(int reason)
+{
+    switch (reason) {
+    case 0x00: return "Success";
+    case 0x01: return "SM: Passkey entry failed";
+    case 0x02: return "SM: OOB not available";
+    case 0x03: return "SM: Authentication requirements";
+    case 0x04: return "SM: Confirm value failed";
+    case 0x05: return "SM: Pairing not supported";
+    case 0x06: return "SM: Encryption key size";
+    case 0x07: return "SM: Command not supported";
+    case 0x08: return "SM: Unspecified reason";
+    case 0x09: return "SM: Repeated attempts";
+    case 0x0A: return "SM: Invalid parameters";
+    case 0x0B: return "SM: DHKey check failed";
+    case 0x0C: return "SM: Numeric comparison failed";
+    case 0x0D: return "SM: BR/EDR pairing in progress";
+    case 0x0E: return "SM: Cross-transport key derivation not allowed";
+    case 0x0F: return "SM: Key rejected";
+    default:   return "SM: Unknown error";
     }
-    
-    // Core BLE host errors
+}
+
+const char *get_sm_error_string(int sm_err)
+{
+    return sm_reason_string(sm_err & 0xff);
+}
+
+// Host / ENC_CHANGE decoder. Do not use for PAIRING_COMPLETE (raw SM).
+const char *get_pairing_error_string(int status)
+{
+    if (status >= 0x500 && status < 0x600) {
+        return sm_reason_string(status - 0x500); // peer SM
+    }
+    if (status >= 0x400 && status < 0x500) {
+        return sm_reason_string(status - 0x400); // local SM
+    }
     switch (status) {
-        case 0: return "Success";
-        case 1: return "Retry later";
-        case 2: return "Already in progress";
-        case 3: return "Invalid parameter";
-        case 8: return "No memory";
-        case 9: return "Not connected";
-        case 13: return "Timeout";
-        default: return "Unknown error";
+    case 0:  return "Success";
+    case 1:  return "Retry later";           // BLE_HS_EAGAIN
+    case 2:  return "Already in progress";   // BLE_HS_EALREADY
+    case 3:  return "Invalid parameter";     // BLE_HS_EINVAL
+    case 6:  return "No memory";             // BLE_HS_ENOMEM
+    case 7:  return "Not connected";         // BLE_HS_ENOTCONN
+    case 8:  return "Not supported";         // BLE_HS_ENOTSUP
+    case 9:  return "Application error";     // BLE_HS_EAPP
+    case 13: return "Timeout";               // BLE_HS_ETIMEOUT
+    default: return "Unknown error";
     }
 }
 
@@ -225,7 +241,7 @@ int ble_sim_smp_event(struct ble_gap_event *event, void *arg)
                     desc.peer_id_addr.type);
         } else if (event->pairing_complete.status != 0) {
             // Pairing failed - log error details with decoded error
-            const char *error_str = get_pairing_error_string(event->pairing_complete.status);
+            const char *error_str = get_sm_error_string(event->pairing_complete.status);
             ESP_LOGE(TAG, "Pairing failed with status: 0x%02x (%s)",
                     event->pairing_complete.status, error_str);
         } else {

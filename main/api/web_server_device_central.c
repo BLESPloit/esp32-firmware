@@ -80,7 +80,7 @@ void web_central_start(const char *device_folder) {
     web_central_broadcast_status();
 }
 
-void web_central_stop(void) {
+void web_central_stop(bool keep_services) {
     xSemaphoreTake(device_central_mutex, portMAX_DELAY);
     current_central_device[0] = '\0';
     xSemaphoreGive(device_central_mutex);
@@ -90,9 +90,9 @@ void web_central_stop(void) {
         return;
     }
 
-    unload_ble_device_for_central();
+    unload_ble_device_for_central(keep_services);
 
-    ESP_LOGI(TAG, "Stopped central");
+    ESP_LOGI(TAG, "Stopped central (keep_services=%d)", keep_services);
     web_central_broadcast_status();
 }
 
@@ -131,7 +131,11 @@ static bool central_ws_handler(const char *type, cJSON *json) {
         cJSON *dev = cJSON_GetObjectItemCaseSensitive(json, "device");
         if (cJSON_IsString(dev)) web_central_start(dev->valuestring);
     }
-    else if (action && strcmp(action, "stop")   == 0) web_central_stop();
+    else if (action && strcmp(action, "stop")   == 0) {
+        cJSON *keep = cJSON_GetObjectItemCaseSensitive(json, "keep_services");
+        bool keep_services = cJSON_IsTrue(keep);
+        web_central_stop(keep_services);
+    }
     else if (action && strcmp(action, "status") == 0) web_central_broadcast_status();
     else if (action && strcmp(action, "menu_select") == 0) {
         cJSON *id = cJSON_GetObjectItemCaseSensitive(json, "id");

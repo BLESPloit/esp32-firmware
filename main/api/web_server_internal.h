@@ -37,7 +37,7 @@ uint8_t register_wifi_config_handlers_in_webserver(httpd_handle_t *server);
 // called from websocket 
 
 void web_central_start(const char *device_folder);
-void web_central_stop(void);
+void web_central_stop(bool keep_services);
 void web_central_broadcast_status(void);
 
 void web_scan_start(bool connectable_only);

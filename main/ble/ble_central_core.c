@@ -25,6 +25,7 @@
 #include "ble/device_manifest.h"
 
 #include "ble/ble_central.h"
+#include "ble/ble_discovery_internal.h"
 
 static const char *TAG = "BLE central - core";
 
@@ -33,13 +34,33 @@ static uint16_t central_conn_handle = BLE_HS_CONN_HANDLE_NONE;
 static char cached_device_id[64] = {0};
 static relay_pending_t g_relay_pending = {0};
 static TimerHandle_t s_central_post_connect_timer = NULL;
+static char s_last_relay_svc[BLE_UUID_STR_LEN];
+static char s_last_relay_chr[BLE_UUID_STR_LEN];
+static bool s_broadcast_discovery_on_ready = false;
 
 static int ble_central_gap_event_handler(struct ble_gap_event *event, void *arg);
-void send_update_central_status_to_ws(const char *status);
 static relay_send_fn_t g_relay_send = websocket_broadcast_json_transient;
 
 static void central_on_ready(uint16_t conn_handle)
 {
+    if (s_broadcast_discovery_on_ready) {
+        s_broadcast_discovery_on_ready = false;
+        if (central_ctx && central_ctx->services) {
+            if (central_ctx->json_root) {
+                cJSON_Delete(central_ctx->json_root);
+                central_ctx->json_root = NULL;
+                central_ctx->json_services = NULL;
+            }
+            central_ctx->json_root = cJSON_CreateObject();
+            central_ctx->json_services = cJSON_CreateArray();
+            if (central_ctx->json_root && central_ctx->json_services) {
+                cJSON_AddItemToObject(central_ctx->json_root, "services", central_ctx->json_services);
+            }
+            build_services_json(central_ctx);
+            web_scan_broadcast_discovery_result_ex(central_ctx, 0, true);
+        }
+    }
+
     send_update_central_status_to_ws("connected");
     ble_lua_bridge_set_conn_handle(conn_handle);
     lua_call_handler_async("on_connected", NULL);
@@ -166,6 +187,78 @@ static int central_handle_conn_update_req(struct ble_gap_event *event)
 // ── HELPERS ────────────────────────────────────────────────── 
 
 bool ble_central_is_active(void) { return central_ctx != NULL; }
+
+// Drop the in-RAM GATT context. Does not touch Lua / interface / graphics.
+static void central_free_ctx(void)
+{
+    if (!central_ctx) {
+        return;
+    }
+    free_services(central_ctx->services);
+    if (central_ctx->json_root) {
+        cJSON_Delete(central_ctx->json_root);
+    }
+    free(central_ctx);
+    central_ctx = NULL;
+    cached_device_id[0] = '\0';
+}
+
+static void central_teardown_runtime(void)
+{
+    interface_central_cleanup();
+    graphics_cleanup();
+    lua_cleanup();
+}
+
+bool ble_central_cache_matches_addr(const ble_addr_t *addr)
+{
+    if (!central_ctx || !central_ctx->services || !addr) {
+        return false;
+    }
+    return memcmp(central_ctx->device_addr.val, addr->val, 6) == 0;
+}
+
+static bool parse_mac_addr_str(const char *addr_str, uint8_t out[6])
+{
+    int parsed = sscanf(addr_str,
+                        "%2hhx:%2hhx:%2hhx:%2hhx:%2hhx:%2hhx",
+                        &out[5], &out[4], &out[3],
+                        &out[2], &out[1], &out[0]);
+    if (parsed == 6) {
+        return true;
+    }
+
+    parsed = sscanf(addr_str,
+                    "%2hhx%2hhx%2hhx%2hhx%2hhx%2hhx",
+                    &out[5], &out[4], &out[3],
+                    &out[2], &out[1], &out[0]);
+    return parsed == 6;
+}
+
+bool ble_central_cache_resolve_addr_str(const char *addr_str, ble_addr_t *out)
+{
+    uint8_t target[6];
+
+    if (!out || !parse_mac_addr_str(addr_str, target)) {
+        return false;
+    }
+    if (!central_ctx || !central_ctx->services) {
+        return false;
+    }
+    if (memcmp(central_ctx->device_addr.val, target, 6) != 0) {
+        return false;
+    }
+
+    memcpy(out, &central_ctx->device_addr, sizeof(ble_addr_t));
+    return true;
+}
+
+void ble_central_request_discovery_broadcast_on_ready(void)
+{
+    s_broadcast_discovery_on_ready = true;
+}
+
+uint16_t ble_central_conn_handle(void) { return central_conn_handle; }
 
 stored_service_t *ble_central_get_services(void) {
     return central_ctx ? central_ctx->services : NULL;
@@ -471,17 +564,16 @@ void ble_central_attach_from_discovery(uint16_t conn_handle,
             central_conn_handle = BLE_HS_CONN_HANDLE_NONE;
         }
 
-        free_services(central_ctx->services);
-        if (central_ctx->json_root) cJSON_Delete(central_ctx->json_root);
-        free(central_ctx);
-        central_ctx = NULL;  // ← clear before re-assign so any racing event sees NULL
+        central_free_ctx();
     }
+    cached_device_id[0] = '\0';
 
     central_ctx = ctx;
     central_conn_handle = conn_handle;
     central_ctx->phase = DISC_PHASE_COMPLETE;
 
     ble_gap_set_event_cb(conn_handle, ble_central_gap_event_handler, NULL);
+    ble_central_smp_claim_pairing_rsp_cb();
 
     central_ensure_mtu(conn_handle);
 }
@@ -492,73 +584,82 @@ void ble_central_attach_from_discovery(uint16_t conn_handle,
 
 esp_err_t ble_central_load_services_and_connect(const char *device_id) {
 
-    if (central_ctx && strncmp(cached_device_id, device_id, sizeof(cached_device_id)) == 0) {
+    if (central_ctx && cached_device_id[0] &&
+        strncmp(cached_device_id, device_id, sizeof(cached_device_id)) == 0) {
         ESP_LOGI(TAG, "Using cached services for %s", device_id);
         ble_central_connect(&central_ctx->device_addr);
         return ESP_OK;
     }
 
-    size_t file_size;
-
     ESP_LOGI(TAG, "Loading stored BLE services for connecting to: %s", device_id);
 
-    // Read manifest.json and resolve all file paths from it
+    // Miss: drop retained GATT map and any leftover library Lua/UI
+    central_free_ctx();
+    if (lua_is_task_running()) {
+        central_teardown_runtime();
+    }
 
     device_paths_t *paths = manifest_resolve(device_id);
     if (!paths || !paths->central) {
-        device_paths_free(paths); free(paths);
+        device_paths_free(paths);
+        free(paths);
         return ESP_FAIL;
     }
 
-    lua_init_persistent_minimal(paths->central->entry, true, paths->vars, paths->uuids);
-    interface_central_init(paths->central->menu);
-
-    // Load BLE services JSON 
+    size_t file_size;
     char *json_buffer = read_json_file(paths->profile, &file_size);
-    if (!json_buffer) return ESP_FAIL;
+    if (!json_buffer) {
+        device_paths_free(paths);
+        free(paths);
+        return ESP_FAIL;
+    }
     ESP_LOGI(TAG, "Read %d bytes from JSON services", file_size);
 
     central_ctx = create_discovery_context(0, 0, false, PAIRING_MODE_NONE, PAIRING_STRATEGY_AUTO, 0);
     if (!central_ctx) {
         ESP_LOGE(TAG, "Failed to create 'central' context");
         free(json_buffer);
+        device_paths_free(paths);
+        free(paths);
         return ESP_FAIL;
     }
 
     stored_service_t *ble_services = NULL;
-    if (parse_json_to_discovery(json_buffer, &ble_services, &central_ctx->device_addr)) {
-        central_ctx->services = ble_services;
-        strncpy(cached_device_id, device_id, sizeof(cached_device_id) - 1);
-    } else {
+    if (!parse_json_to_discovery(json_buffer, &ble_services, &central_ctx->device_addr)) {
         ESP_LOGE(TAG, "Error parsing JSON services");
+        free(json_buffer);
+        central_free_ctx();
+        device_paths_free(paths);
+        free(paths);
+        return ESP_FAIL;
     }
     free(json_buffer);
 
-    if (central_ctx != NULL) {
-        ESP_LOGI(TAG, "Successfully parsed BLE services for connection");
-        lua_init_persistent_minimal(paths->central->entry, true, paths->vars, paths->uuids);
-        interface_central_init(paths->central->menu);
-        ble_central_start_scanning();
-        device_paths_free(paths);
-        free(paths);
-        log_memory_usage("BLE central ready");
-    } else {
-        ESP_LOGE(TAG, "Failed to parse JSON");
-        return ESP_FAIL;
-    }
+    central_ctx->services = ble_services;
+    strncpy(cached_device_id, device_id, sizeof(cached_device_id) - 1);
+    cached_device_id[sizeof(cached_device_id) - 1] = '\0';
 
+    ESP_LOGI(TAG, "Successfully parsed BLE services for connection");
+    lua_init_persistent_minimal(paths->central->entry, true, paths->vars, paths->uuids);
+    interface_central_init(paths->central->menu);
+    ble_central_start_scanning();
+    device_paths_free(paths);
+    free(paths);
+    log_memory_usage("BLE central ready");
     return ESP_OK;
 }
 
 // free resources, unload graphics, fonts, ...
-void unload_ble_device_for_central(void) {
-    ESP_LOGI(TAG, "Unloading BLE device central...");
+void unload_ble_device_for_central(bool keep_services) {
+    ESP_LOGI(TAG, "Unloading BLE device central (keep_services=%d)...", keep_services);
 
     if (!central_ctx) {
         ESP_LOGW(TAG, "unload_ble_device_for_central: already unloaded, ignoring");
         return;
     }
 
+    s_broadcast_discovery_on_ready = false;
+    ble_central_smp_reset();
     central_cancel_post_connect();
 
     // Cancel ongoing operations (pending connect + scan)
@@ -582,23 +683,27 @@ void unload_ble_device_for_central(void) {
         vTaskDelay(pdMS_TO_TICKS(200));  // Allow disconnect event
         central_conn_handle = BLE_HS_CONN_HANDLE_NONE;
     }
-  
-    // Cleanup interface
-    interface_central_cleanup();
-    
-    // Cleanup graphics
-    graphics_cleanup();
-    
-    // Cleanup Lua state
-    lua_cleanup();
 
-    // Cleanup services
-    free_services(central_ctx->services);
-    if (central_ctx->json_root) cJSON_Delete(central_ctx->json_root);
-    free(central_ctx);
-    central_ctx = NULL;
+    if (keep_services && central_ctx->services) {
+        ESP_LOGI(TAG, "Keeping in-RAM GATT service map for %02X:%02X:%02X:%02X:%02X:%02X",
+                 central_ctx->device_addr.val[5], central_ctx->device_addr.val[4],
+                 central_ctx->device_addr.val[3], central_ctx->device_addr.val[2],
+                 central_ctx->device_addr.val[1], central_ctx->device_addr.val[0]);
+        if (central_ctx->json_root) {
+            cJSON_Delete(central_ctx->json_root);
+            central_ctx->json_root = NULL;
+            central_ctx->json_services = NULL;
+        }
+        central_ctx->conn_handle = BLE_HS_CONN_HANDLE_NONE;
+        central_ctx->phase = DISC_PHASE_COMPLETE;
+        ESP_LOGI(TAG, "Central soft-unloaded (services retained)");
+        log_memory_usage("After BLE 'central' soft unload");
+        return;
+    }
 
-    interface_central_state_clear_all(); // or maybe leave it for the next connection?
+    central_teardown_runtime();
+    central_free_ctx();
+    interface_central_state_clear_all();
 
     ESP_LOGI(TAG, "BLE device unloaded successfully");
     log_memory_usage("After BLE 'central' unload");
@@ -683,6 +788,47 @@ static char *relay_routing_suffix(void) {
     return out;
 }
 
+static void relay_remember_uuids(const char *svc, const char *chr)
+{
+    snprintf(s_last_relay_svc, sizeof(s_last_relay_svc), "%s", svc ? svc : "");
+    snprintf(s_last_relay_chr, sizeof(s_last_relay_chr), "%s", chr ? chr : "");
+}
+
+static void relay_fill_uuids(char *svc, size_t svc_len, char *chr, size_t chr_len)
+{
+    if (svc && !svc[0] && s_last_relay_svc[0]) {
+        snprintf(svc, svc_len, "%s", s_last_relay_svc);
+    }
+    if (chr && !chr[0] && s_last_relay_chr[0]) {
+        snprintf(chr, chr_len, "%s", s_last_relay_chr);
+    }
+}
+
+static int host_status_to_att(int host_error)
+{
+    if (host_error >= 0x100 && host_error <= 0x1FF) {
+        return host_error - 0x100;
+    }
+    return host_error;
+}
+
+static bool relay_status_needs_pair(int host_status)
+{
+    int att = host_status_to_att(host_status);
+    return (att == BLE_ATT_ERR_INSUFFICIENT_AUTHEN ||
+            att == BLE_ATT_ERR_INSUFFICIENT_ENC ||
+            att == BLE_ATT_ERR_INSUFFICIENT_KEY_SZ);
+}
+
+static void relay_maybe_pair_on_auth(uint16_t conn_handle, int host_status,
+                                     const char *svc, const char *chr, uint32_t seq)
+{
+    if (!relay_status_needs_pair(host_status)) {
+        return;
+    }
+    ble_central_smp_on_auth_error(conn_handle, host_status, svc, chr, seq);
+}
+
 // ── Callbacks ────────────────────────────────────────────────── 
 
 static int relay_read_cb(uint16_t conn_handle, const struct ble_gatt_error *error,
@@ -693,7 +839,9 @@ static int relay_read_cb(uint16_t conn_handle, const struct ble_gatt_error *erro
 
     relay_handle_to_uuids(attr ? attr->handle : 0, svc_buf, sizeof(svc_buf),
                           chr_buf, sizeof(chr_buf));
+    relay_fill_uuids(svc_buf, sizeof(svc_buf), chr_buf, sizeof(chr_buf));
 
+    uint32_t seq = g_relay_pending.valid ? g_relay_pending.seq : 0;
     char *routing = relay_routing_suffix();
     if (error->status == 0 && attr && attr->om) {
         char *hex = relay_mbuf_to_hex(attr->om);
@@ -710,6 +858,9 @@ static int relay_read_cb(uint16_t conn_handle, const struct ble_gatt_error *erro
     }
     free(routing);
     websocket_broadcast_json(resp);
+    if (error->status != 0) {
+        relay_maybe_pair_on_auth(conn_handle, error->status, svc_buf, chr_buf, seq);
+    }
     return 0;
 }
 
@@ -722,7 +873,9 @@ static int relay_write_cb(uint16_t conn_handle, const struct ble_gatt_error *err
 
     relay_handle_to_uuids(attr ? attr->handle : 0, svc_buf, sizeof(svc_buf),
                           chr_buf, sizeof(chr_buf));
+    relay_fill_uuids(svc_buf, sizeof(svc_buf), chr_buf, sizeof(chr_buf));
 
+    uint32_t seq = g_relay_pending.valid ? g_relay_pending.seq : 0;
     char *routing = relay_routing_suffix();
     snprintf(resp, sizeof(resp),
              "{\"type\":\"relay\",\"action\":\"write_rsp\",\"svc\":\"%s\",\"chr\":\"%s\","
@@ -730,6 +883,9 @@ static int relay_write_cb(uint16_t conn_handle, const struct ble_gatt_error *err
              svc_buf, chr_buf, error->status, routing);
     free(routing);
     websocket_broadcast_json(resp);
+    if (error->status != 0) {
+        relay_maybe_pair_on_auth(conn_handle, error->status, svc_buf, chr_buf, seq);
+    }
     return 0;
 }
 
@@ -742,6 +898,7 @@ static int relay_desc_read_cb(uint16_t conn_handle,
 {
     relay_desc_read_ctx_t *ctx = (relay_desc_read_ctx_t *)arg;
     char resp[580];
+    uint32_t seq = g_relay_pending.valid ? g_relay_pending.seq : 0;
     char *routing = relay_routing_suffix();
 
     if (error->status == 0 && attr && attr->om) {
@@ -768,8 +925,13 @@ static int relay_desc_read_cb(uint16_t conn_handle,
             routing);
     }
     free(routing);
-    free(ctx);
     websocket_broadcast_json(resp);
+    if (error->status != 0) {
+        relay_maybe_pair_on_auth(conn_handle, error->status,
+                                 ctx ? ctx->svc : s_last_relay_svc,
+                                 ctx ? ctx->chr : s_last_relay_chr, seq);
+    }
+    free(ctx);
     return 0;
 }
 
@@ -781,6 +943,7 @@ static int relay_subscribe_cb(uint16_t conn_handle,
 {
     relay_subscribe_ctx_t *ctx = (relay_subscribe_ctx_t *)arg;
     char resp[300];
+    uint32_t seq = g_relay_pending.valid ? g_relay_pending.seq : 0;
     char *routing = relay_routing_suffix();  // consume seq/dst here
 
     snprintf(resp, sizeof(resp),
@@ -791,8 +954,13 @@ static int relay_subscribe_cb(uint16_t conn_handle,
         error->status,
         routing);
     free(routing);
-    free(ctx);  // free the heap-allocated context
     websocket_broadcast_json(resp);
+    if (error->status != 0) {
+        relay_maybe_pair_on_auth(conn_handle, error->status,
+                                 ctx ? ctx->svc : s_last_relay_svc,
+                                 ctx ? ctx->chr : s_last_relay_chr, seq);
+    }
+    free(ctx);
     return 0;
 }
 
@@ -880,6 +1048,7 @@ static void relay_send_immediate_rsp(ble_relay_op_t op, int status, const char *
 
 void ble_central_relay_op(const char *svc_uuid_str, const char *chr_uuid_str,
                           const char *data_hex, ble_relay_op_t op) {
+    relay_remember_uuids(svc_uuid_str, chr_uuid_str);
     if (central_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
         ESP_LOGE(TAG, "Relay: no connection");
         relay_send_immediate_rsp(op, -1, "Not connected", svc_uuid_str, chr_uuid_str, NULL);
@@ -1060,6 +1229,7 @@ esp_err_t ble_central_reattach(uint16_t conn_handle)
 
     // Re-register central's GAP event handler (discovery may have taken it over)
     ble_gap_set_event_cb(conn_handle, ble_central_gap_event_handler, NULL);
+    ble_central_smp_claim_pairing_rsp_cb();
 
     central_ensure_mtu(conn_handle);
 
@@ -1108,6 +1278,18 @@ static int ble_central_gap_event_handler(struct ble_gap_event *event, void *arg)
             central_schedule_post_connect(event->connect.conn_handle,
                                           BLE_CENTRAL_POST_CONNECT_SETTLE_MS);
 
+        } else {
+            // Cache-hit / library-central connect failed (timeout, peer gone).
+            // Discovery's GAP handler broadcasts this; we skipped that handler.
+            ESP_LOGE(TAG, "BLE_GAP_EVENT_CONNECT failed: status=%d", event->connect.status);
+            central_cancel_post_connect();
+            s_broadcast_discovery_on_ready = false;
+            central_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+            if (central_ctx) {
+                central_ctx->conn_handle = BLE_HS_CONN_HANDLE_NONE;
+            }
+            send_update_central_status_to_ws("disconnected");
+            web_broadcast_connection_progress_connection(central_ctx, "failed");
         }
 
         break;
@@ -1121,6 +1303,7 @@ static int ble_central_gap_event_handler(struct ble_gap_event *event, void *arg)
             return 0;
         }
         central_cancel_post_connect();
+        ble_central_smp_on_disconnect(central_conn_handle, event->disconnect.reason);
         central_conn_handle = BLE_HS_CONN_HANDLE_NONE;
         ble_lua_bridge_clear_conn_handle();
         send_update_central_status_to_ws("disconnected");
@@ -1155,13 +1338,12 @@ static int ble_central_gap_event_handler(struct ble_gap_event *event, void *arg)
         
         break;
 
-    case BLE_GAP_EVENT_ENC_CHANGE:  
+    case BLE_GAP_EVENT_ENC_CHANGE:
     case BLE_GAP_EVENT_PASSKEY_ACTION:
-    case BLE_GAP_EVENT_IDENTITY_RESOLVED:       
+    case BLE_GAP_EVENT_IDENTITY_RESOLVED:
     case BLE_GAP_EVENT_REPEAT_PAIRING:
     case BLE_GAP_EVENT_PARING_COMPLETE:
-        ESP_LOGI(TAG, "Central SMP: to be implemented");
-        break;
+        return ble_central_smp_handle_gap_event(event, arg);
 
     default:
         ESP_LOGW(TAG, "Unhandled GAP event: %d", event->type);

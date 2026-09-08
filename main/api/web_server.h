@@ -59,6 +59,7 @@ void ws_relay_client_disconnect(void);
 
 
 void web_scan_broadcast_discovery_result(discovery_context_t *ctx, int rc);
+void web_scan_broadcast_discovery_result_ex(discovery_context_t *ctx, int rc, bool cached);
 
 // broadcast connection/service discovery progress
 void web_broadcast_connection_progress(const char *addr, const char *phase, const char *status, const char *detail);

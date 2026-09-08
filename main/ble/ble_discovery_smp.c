@@ -32,7 +32,8 @@ pairing_attempt_context_t g_pairing_attempt = {0};
 #define DEFAULT_PIN 123456
 
 
-const char* get_pairing_error_string(int status); // ble_sim_smp.c
+const char *get_pairing_error_string(int status); // ble_sim_smp.c (host / ENC_CHANGE)
+const char *get_sm_error_string(int sm_err);      // raw BLE_SM_ERR_* (PAIRING_COMPLETE)
 
 
 // simple broadcast status helper (no heavy cJSON)
@@ -209,8 +210,12 @@ void pairing_response_callback(uint16_t conn_handle,
                                      const struct ble_sm_pairing_params *rsp, 
                                      void *arg)
 {
-    if (!g_disc_ctx || conn_handle != g_disc_ctx->conn_handle) {
-        ESP_LOGW(TAG, "Pairing response for unknown connection (handle=%d)", conn_handle);
+    if (!g_disc_ctx) {
+        return;
+    }
+    if (conn_handle != g_disc_ctx->conn_handle) {
+        ESP_LOGW(TAG, "Pairing response for unknown connection (handle=%u, expected=%u)",
+                 (unsigned)conn_handle, (unsigned)g_disc_ctx->conn_handle);
         return;
     }
     
@@ -829,7 +834,7 @@ int ble_smp_handle_gap_event(struct ble_gap_event *event, void *arg)
                     desc.peer_id_addr.type);                    
         } else if (event->pairing_complete.status != 0) {
             // Pairing failed - log error details with decoded error
-            const char *error_str = get_pairing_error_string(event->pairing_complete.status);
+            const char *error_str = get_sm_error_string(event->pairing_complete.status);
             web_broadcast_smp_progress("pairing_complete",
                                        event->pairing_complete.conn_handle,
                                        event->pairing_complete.status,
