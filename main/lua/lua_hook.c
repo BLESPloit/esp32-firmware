@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <lua.h>
 #include <lualib.h>
@@ -18,6 +19,7 @@
 #include "lua/lua_crypto.h"
 #include "lua/lua_gfx.h"
 #include "lua/lua_gpio.h"
+#include "lua/lua_bits_hex.h"
 #include "lua/lua_hook.h"
 
 #define TAG "LUA"
@@ -44,63 +46,6 @@ static char g_vars_path[128] = "";
 
 lua_State *lua_get_state(void) {
     return g_lua_state;
-}
-
-/**
- * Convert binary data to hex string
- * Lua: hex_string = bin_to_hex(binary_data)
- */
- static int lua_bin_to_hex(lua_State* L) {
-    size_t len;
-    const unsigned char *data = (const unsigned char *)luaL_checklstring(L, 1, &len);
-    
-    char *hex = malloc(len * 2 + 1);
-    if (!hex) {
-        return luaL_error(L, "Memory allocation failed");
-    }
-    
-    for (size_t i = 0; i < len; i++) {
-        sprintf(hex + i * 2, "%02X", data[i]);
-    }
-    hex[len * 2] = '\0';
-    
-    lua_pushstring(L, hex);
-    free(hex);
-    
-    return 1;
-}
-
-/**
- * Convert hex string to binary data
- * Lua: binary_data = hex_to_bin(hex_string)
- */
-static int lua_hex_to_bin(lua_State* L) {
-    const char *hex = luaL_checkstring(L, 1);
-    size_t hex_len = strlen(hex);
-    
-    if (hex_len % 2 != 0) {
-        return luaL_error(L, "Hex string must have even length");
-    }
-    
-    size_t bin_len = hex_len / 2;
-    unsigned char *bin = malloc(bin_len);
-    if (!bin) {
-        return luaL_error(L, "Memory allocation failed");
-    }
-    
-    for (size_t i = 0; i < bin_len; i++) {
-        unsigned int byte;
-        if (sscanf(hex + i * 2, "%2x", &byte) != 1) {
-            free(bin);
-            return luaL_error(L, "Invalid hex character at position %d", i * 2);
-        }
-        bin[i] = (unsigned char)byte;
-    }
-    
-    lua_pushlstring(L, (const char *)bin, bin_len);
-    free(bin);
-    
-    return 1;
 }
 
 /**
@@ -526,8 +471,7 @@ esp_err_t lua_init_persistent_minimal(const char *script_path, bool central,
     lua_gpio_register_functions(g_lua_state);
 
     // Register utility functions
-    lua_register(g_lua_state, "bin_to_hex", lua_bin_to_hex);
-    lua_register(g_lua_state, "hex_to_bin", lua_hex_to_bin);
+    lua_bits_hex_register_functions(g_lua_state);
     lua_register(g_lua_state, "get_time", lua_get_time);
 
     lua_register(g_lua_state, "vars_save", lua_vars_save);
