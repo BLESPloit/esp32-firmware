@@ -22,8 +22,9 @@ Peripheral **GATT `dynamic` hooks** in JSON (`on_read`, `on_write`, …) can cal
 | Function | Description |
 |----------|-------------|
 | `delay(seconds, func_name)` | Schedule global function `func_name` with zero args. |
-| `bin_to_hex(binary)` → string | Uppercase hex. |
-| `hex_to_bin(hex)` → binary | Even length; accepts hex digits (e.g. `%2x` parsing). |
+| `bin_to_hex(binary)` → string | Lowercase hex. Non-string → `""`. |
+| `hex_to_bin(hex)` → binary | Strip whitespace; mixed case OK; odd / invalid / non-string → `""`. |
+| `bits` / `hex` | Shared unpack/pack tables (same API as mobile). See below. |
 | `get_time()` → integer | `time(NULL)` — wall clock only if the device has time set (e.g. SNTP). |
 | `vars_save()` → bool | Writes global **`vars`** table to manifest **`vars.json`** path; scalar fields only. |
 | `gpio_set(name, level)` → ok [, err] | Drive symbolic GPIO **`gpio_a`** or **`gpio_b`** high (1/true) or low (0/false). First use configures the pin as output. |
@@ -36,6 +37,46 @@ Peripheral **GATT `dynamic` hooks** in JSON (`on_read`, `on_write`, …) can cal
 | `ecdh_generate_keypair()` → priv32, pub64 | secp256r1; `pub64` is X‖Y without `0x04` prefix. |
 | `ecdh_compute_shared(priv32, peer_pub64)` → shared32 | 32-byte shared secret. |
 | `random_bytes(n)` → binary | Hardware RNG; `n` in 1..1024. |
+
+`bin_to_hex`, `bits.tohex`, and `hex.*` packers emit **lowercase** hex. Decoders accept mixed case.
+
+### `hex` table
+
+Pack integers wrap to the field width, then emit lowercase hex. Non-numbers raise.
+
+| Function | Behavior |
+|----------|----------|
+| `hex.u8(n)` | Pack 8-bit; width 2. `hex.u8(0x123)` → `"23"`; `hex.u8(-1)` → `"ff"`. |
+| `hex.le16(n)` / `hex.be16(n)` | Pack 16-bit LE/BE; width 4. `hex.le16(0x10000)` → `"0000"`. |
+| `hex.le32(n)` / `hex.be32(n)` | Pack 32-bit LE/BE; width 8. |
+| `hex.norm(s)` | Strip whitespace, lowercase; non-string → `""`. |
+| `hex.byte(h, i)` | Alias of `bits.byte_at` (1-based byte index into hex as given). Pack one octet with `hex.u8`. |
+| `hex.len(h)` | Octet count after `norm`. |
+| `hex.slice(h, from, n)` | `n` octets from 1-based `from` after `norm`; OOB → `""`. |
+| `hex.to_ascii(h)` | Lossy: keep bytes `0x20`–`0x7E`. |
+| `hex.from_ascii(s)` | Each octet → two lowercase hex digits. |
+
+### `bits` table
+
+Bitwise ops error on non-number. Unpack `(hex, offset)` uses a **1-based byte index** into the hex string as given (not `hex.norm`'d). Short / odd / invalid → `0`.
+
+- `band`, `bor`, `bxor`, `bnot`, `rshift`, `lshift`, `arshift`
+- `byte_at(hex, index)`
+- `tohex(n [, width])` — lowercase
+- `fromhex(hex)`
+- `le16` / `be16` / `le32` / `be32`
+
+**When to use which:** Central ATT (`ble_write`, `ble_read`, `on_notify`) is **hex text**. Crypto and peripheral `on_write(input)` are **binary**.
+
+| Use | For |
+|-----|-----|
+| `hex.u8` / `hex.le16` / `hex.be16` / `hex.le32` / `hex.be32` | Pack a **field** (integer → 2/4/8 hex chars) for `ble_write` / `ble_notify`. |
+| `bits.byte_at` / `bits.le16` / `bits.be16` / `bits.le32` / `bits.be32` | Unpack a **field** from hex at a 1-based byte offset. |
+| `hex.norm` / `hex.slice` / `hex.len` | Navigate hex without converting to binary. |
+| `hex.from_ascii` | Plain ASCII → hex (`hex.from_ascii("1")` → `"31"`). |
+| `bin_to_hex` / `hex_to_bin` | Whole **blob** (binary Lua string ↔ hex). Crypto edges and `on_write(input)`. Invalid hex → `""`. |
+
+Do **not** use `bits.tohex` as blob encode. Do not pass `hex_to_bin(...)` to `ble_write` / `ble_notify`. Do not wrap `ble_read` / `on_notify` with `bin_to_hex`.
 
 **GPIO availability** is board/build-dependent (Kconfig). Bare/generic builds default to no named GPIOs (`-1`); M5StickS3 uses GPIO 4/5; LilyGO T-QT Pro uses GPIO 16/17. Unavailable pins return an error at call time.
 
@@ -59,8 +100,8 @@ BLE GATT client (blocking, ~3s timeout on read/write):
 | Function | Description |
 |----------|-------------|
 | `ble_connected()` → bool | Connection present. |
-| `ble_write(svc_uuid, chr_uuid, data_bin)` → ok [, err] | Write characteristic; `data_bin` is raw bytes. UUIDs accept common string forms; matching is normalized. |
-| `ble_read(svc_uuid, chr_uuid)` → data_bin \| nil [, err] | Read characteristic value. |
+| `ble_write(svc_uuid, chr_uuid, data_hex [, no_resp])` → ok [, err] | Write characteristic. `data_hex` is a non-empty even hex string (`0-9a-fA-F`); invalid / empty / non-string → `false, err` (no GATT). Optional `no_resp` is Lua-truthy Write Command (immediate `rc`, no wait). UUIDs accept common string forms; matching is normalized. `ble_write(svc, chr, ble_read(...))` works for any **non-empty** value; empty `ble_read` → `""` is not writable. |
+| `ble_read(svc_uuid, chr_uuid)` → hex \| nil [, err] | Read characteristic; success is lowercase hex (empty value → `""`). |
 | `ble_subscribe(svc_uuid, chr_uuid)` → ok [, err] | Enable notify on CCCD (`0x0001`); deliveries go to `on_notify`. |
 | `ble_unsubscribe(svc_uuid, chr_uuid)` → ok | Best-effort disable notify. |
 | `get_mtu()` → int | Negotiated ATT MTU for the active central or sim link (default 23 if unknown); usable notify/write payload roughly `get_mtu() - 3`. Central auto-exchanges MTU on connect before `on_connected`. |

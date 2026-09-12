@@ -479,23 +479,61 @@ static uint16_t resolve_handle_from_lua(lua_State *L, const char *caller) {
     return chr->val_handle;
 }
 
-// ble_write(svc_uuid, chr_uuid, data_binary)
+// ble_write(svc_uuid, chr_uuid, data_hex [, no_resp])
 // Returns true, or false + error string.
+static int lua_ble_write_invalid_hex(lua_State *L) {
+    lua_pushboolean(L, 0);
+    lua_pushstring(L, "ble_write: invalid hex");
+    return 2;
+}
+
 static int lua_ble_write(lua_State *L) {
     if (g_conn_handle == BLE_HS_CONN_HANDLE_NONE)
         return luaL_error(L, "ble_write: not connected");
 
     uint16_t handle = resolve_handle_from_lua(L, "ble_write");
 
-    size_t data_len;
-    const char *data = luaL_checklstring(L, 3, &data_len);
+    if (lua_type(L, 3) != LUA_TSTRING)
+        return lua_ble_write_invalid_hex(L);
+
+    size_t hex_len;
+    const char *hex_str = lua_tolstring(L, 3, &hex_len);
+    if (hex_len == 0 || hex_len % 2 != 0)
+        return lua_ble_write_invalid_hex(L);
+
+    size_t bin_len = hex_len / 2;
+    uint8_t *bin = malloc(bin_len);
+    if (!bin) return luaL_error(L, "ble_write: OOM");
+
+    int decoded = hex_string_to_bytes(hex_str, bin, (int)bin_len);
+    if (decoded < 0) {
+        free(bin);
+        return lua_ble_write_invalid_hex(L);
+    }
+
+    int no_resp = lua_toboolean(L, 4);
+    if (no_resp) {
+        int rc = ble_gattc_write_no_rsp_flat(g_conn_handle, handle, bin, (uint16_t)decoded);
+        free(bin);
+        if (rc != 0) {
+            lua_pushboolean(L, 0);
+            lua_pushfstring(L, "ble_write: gattc error %d", rc);
+            return 2;
+        }
+        lua_pushboolean(L, 1);
+        return 1;
+    }
 
     ble_op_result_t res = {0};
     res.done_sem = xSemaphoreCreateBinary();
-    if (!res.done_sem) return luaL_error(L, "ble_write: OOM");
+    if (!res.done_sem) {
+        free(bin);
+        return luaL_error(L, "ble_write: OOM");
+    }
 
     int rc = ble_gattc_write_flat(g_conn_handle, handle,
-                                   data, data_len, gattc_write_cb, &res);
+                                   bin, (uint16_t)decoded, gattc_write_cb, &res);
+    free(bin);
     if (rc != 0) {
         vSemaphoreDelete(res.done_sem);
         lua_pushboolean(L, 0);
@@ -520,7 +558,7 @@ static int lua_ble_write(lua_State *L) {
 }
 
 // ble_read(svc_uuid, chr_uuid)
-// Returns binary string, or nil + error string.
+// Returns lowercase hex string, or nil + error string.
 static int lua_ble_read(lua_State *L) {
     if (g_conn_handle == BLE_HS_CONN_HANDLE_NONE)
         return luaL_error(L, "ble_read: not connected");
@@ -551,7 +589,9 @@ static int lua_ble_read(lua_State *L) {
         return 2;
     }
 
-    lua_pushlstring(L, (const char *)res.data, res.data_len);
+    char hex[BLE_LUA_DATA_LEN * 2 + 1];
+    bin_to_hex_string(res.data, res.data_len, hex);
+    lua_pushlstring(L, hex, res.data_len * 2);
     return 1;
 }
 
