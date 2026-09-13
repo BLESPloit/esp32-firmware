@@ -20,6 +20,7 @@
 #include "lua/lua_gfx.h"
 #include "lua/lua_gpio.h"
 #include "lua/lua_bits_hex.h"
+#include "lua/lua_mac.h"
 #include "lua/lua_hook.h"
 
 #define TAG "LUA"
@@ -472,6 +473,7 @@ esp_err_t lua_init_persistent_minimal(const char *script_path, bool central,
 
     // Register utility functions
     lua_bits_hex_register_functions(g_lua_state);
+    lua_mac_register_functions(g_lua_state);
     lua_register(g_lua_state, "get_time", lua_get_time);
 
     lua_register(g_lua_state, "vars_save", lua_vars_save);

@@ -25,6 +25,7 @@ Peripheral **GATT `dynamic` hooks** in JSON (`on_read`, `on_write`, …) can cal
 | `bin_to_hex(binary)` → string | Lowercase hex. Non-string → `""`. |
 | `hex_to_bin(hex)` → binary | Strip whitespace; mixed case OK; odd / invalid / non-string → `""`. |
 | `bits` / `hex` | Shared unpack/pack tables (same API as mobile). See below. |
+| `mac` | `mac.format` / `mac.reverse_octets` / `mac.from_reversed` (same API as mobile). No `adv` / `uuid` on firmware. |
 | `get_time()` → integer | `time(NULL)` — wall clock only if the device has time set (e.g. SNTP). |
 | `vars_save()` → bool | Writes global **`vars`** table to manifest **`vars.json`** path; scalar fields only. |
 | `gpio_set(name, level)` → ok [, err] | Drive symbolic GPIO **`gpio_a`** or **`gpio_b`** high (1/true) or low (0/false). First use configures the pin as output. |
@@ -65,6 +66,16 @@ Bitwise ops error on non-number. Unpack `(hex, offset)` uses a **1-based byte in
 - `tohex(n [, width])` — lowercase
 - `fromhex(hex)`
 - `le16` / `be16` / `le32` / `be32`
+
+### `mac` table
+
+Invalid / not exactly 6 octets → `""`. Colons, dashes, and spaces are ignored.
+
+| Function | Behavior |
+|----------|----------|
+| `mac.format(hex12)` | `AA:BB:CC:DD:EE:FF` uppercase. |
+| `mac.reverse_octets(hex12)` | 12 lowercase hex, octet-reversed. |
+| `mac.from_reversed(hex12)` | `mac.format(mac.reverse_octets(hex12))`. |
 
 **When to use which:** Central ATT (`ble_write`, `ble_read`, `on_notify`) is **hex text**. Crypto and peripheral `on_write(input)` are **binary**.
 
