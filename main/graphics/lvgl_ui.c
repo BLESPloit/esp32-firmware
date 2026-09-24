@@ -1,3 +1,4 @@
+#include <math.h>
 #include <stdio.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -351,6 +352,36 @@ lv_obj_t *disp_render_png(const uint8_t *png_buf, size_t png_len, int x, int y, 
 
 // ── TEXT ──────────────────────────────────────────────────────────
 
+// sRGB channel to linear
+static float channel_lin(uint8_t c)
+{
+    float s = c / 255.0f;
+    return (s <= 0.04045f) ? (s / 12.92f) : powf((s + 0.055f) / 1.055f, 2.4f);
+}
+
+static float rel_luminance(uint32_t rgb)
+{
+    return 0.2126f * channel_lin((rgb >> 16) & 0xFF)
+         + 0.7152f * channel_lin((rgb >> 8) & 0xFF)
+         + 0.0722f * channel_lin(rgb & 0xFF);
+}
+
+// Dark text sits on a near-white chip; light text sits on translucent black.
+static void apply_text_plate(lv_obj_t *bg, uint32_t text_color)
+{
+    lv_color_t plate;
+    lv_opa_t opa;
+    if (rel_luminance(text_color) < 0.55f) {
+        plate = lv_color_white();
+        opa = 235; // 0.92 * 255
+    } else {
+        plate = lv_color_black();
+        opa = 115; // 0.45 * 255
+    }
+    lv_obj_set_style_bg_color(bg, plate, 0);
+    lv_obj_set_style_bg_opa(bg, opa, 0);
+}
+
 lv_obj_t *disp_render_text(const char *text, int x, int y, lv_align_t lvalign, uint8_t size_pct, uint32_t color)
 {
     if (!lvgl_lock(-1)) return NULL;
@@ -360,8 +391,7 @@ lv_obj_t *disp_render_text(const char *text, int x, int y, lv_align_t lvalign, u
 
     // ── background container ─────────────────────────────────────────── 
     lv_obj_t *bg = lv_obj_create(lv_scr_act());
-    lv_obj_set_style_bg_color(bg, lv_color_black(), 0);
-    lv_obj_set_style_bg_opa(bg, LV_OPA_40, 0);
+    apply_text_plate(bg, color);
     lv_obj_set_style_border_width(bg, 0, 0);
     lv_obj_set_style_pad_all(bg, 2, 0); 
     lv_obj_align(bg, lvalign, off_x, off_y);
@@ -410,6 +440,8 @@ lv_obj_t *disp_render_text(const char *text, int x, int y, lv_align_t lvalign, u
 {
     if (!bg || !lv_obj_is_valid(bg)) return false;
     if (!lvgl_lock(-1))              return false;
+
+    apply_text_plate(bg, color);
 
     // First child of bg is the label
     lv_obj_t *label = lv_obj_get_child(bg, 0);
