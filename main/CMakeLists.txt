@@ -31,6 +31,10 @@ else()
     )
 endif()
 
+if(CONFIG_BLESPLOIT_BOARD_M5STICKS3)
+    list(APPEND LVGL_SRCS "graphics/battery_ui.c")
+endif()
+
 file(GLOB HTML_FILES "html/*")
 
 idf_component_register(

@@ -22,6 +22,7 @@
 #include "ble/device_parser.h"
 #include "lua/lua_hook.h"
 #include "graphics/graphics.h"
+#include "graphics/battery_ui.h"
 #include "common/storage.h"
 #include "common/utils.h"
 #include "api/web_server.h"
@@ -57,6 +58,9 @@ void app_main(void)
    
     display_init();
     lvgl_init();
+#if CONFIG_BLESPLOIT_BOARD_M5STICKS3
+    battery_ui_start();
+#endif
 
     // Initialize button manager and named GPIOs
     ESP_ERROR_CHECK(button_init());

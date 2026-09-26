@@ -134,6 +134,15 @@ esp_err_t pmic_read_battery_voltage(uint16_t *voltage_mv);
 esp_err_t pmic_read_vin_voltage(uint16_t *voltage_mv);
 
 /**
+ * @brief Read battery percent and charging state in one poll.
+ *
+ * One VBAT read and one VIN read. Percent is a linear map of 3300–4200 mV,
+ * clamped to 0–100. Charging is VIN > 4000 mV and VBAT < 4150 mV, the same
+ * thresholds as pmic_is_charging(). Either output pointer may be NULL.
+ */
+esp_err_t pmic_read_battery_status(int *pct, bool *charging);
+
+/**
  * @brief Check if charging
  * @param is_charging Pointer to store charging status
  * @return ESP_OK on success

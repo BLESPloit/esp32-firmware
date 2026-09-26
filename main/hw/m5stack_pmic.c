@@ -258,6 +258,38 @@ esp_err_t pmic_read_vin_voltage(uint16_t *voltage_mv)
     return pmic_read_u16(PMIC_REG_VIN_L, voltage_mv);
 }
 
+// Same thresholds as pmic_is_charging().
+#define VIN_USB_PRESENT_MV   4000
+#define VBAT_FULL_MV         4150
+#define BATTERY_MIN_MV       3300
+#define BATTERY_MAX_MV       4200
+
+static int battery_pct_from_mv(uint16_t mv)
+{
+    int pct = (int)(((long)mv - BATTERY_MIN_MV) * 100 / (BATTERY_MAX_MV - BATTERY_MIN_MV));
+    if (pct > 100) pct = 100;
+    if (pct < 0)   pct = 0;
+    return pct;
+}
+
+esp_err_t pmic_read_battery_status(int *pct, bool *charging)
+{
+    uint16_t vbat_mv = 0;
+    uint16_t vin_mv = 0;
+    esp_err_t ret = pmic_read_battery_voltage(&vbat_mv);
+    if (ret != ESP_OK) return ret;
+    ret = pmic_read_vin_voltage(&vin_mv);
+    if (ret != ESP_OK) return ret;
+
+    if (pct) {
+        *pct = battery_pct_from_mv(vbat_mv);
+    }
+    if (charging) {
+        *charging = (vin_mv > VIN_USB_PRESENT_MV) && (vbat_mv < VBAT_FULL_MV);
+    }
+    return ESP_OK;
+}
+
 esp_err_t pmic_get_chip_id(uint8_t *id)
 {
     return pmic_read_reg(PMIC_REG_ID, id);
