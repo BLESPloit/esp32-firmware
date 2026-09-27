@@ -13,9 +13,14 @@
 #include "mbedtls/aes.h"
 #include "mbedtls/sha256.h"
 #include "mbedtls/ecdh.h"
+#include "mbedtls/ecp.h"
 #include "mbedtls/entropy.h"
 #include "mbedtls/ctr_drbg.h"
 #include "mbedtls/md.h"
+#include "mbedtls/rsa.h"
+#include "mbedtls/cipher.h"
+#include "mbedtls/cmac.h"
+#include <stdlib.h>
 
 #define TAG "LUA crypto"
 
@@ -398,16 +403,498 @@ int lua_random_bytes(lua_State* L)
 }
 
 
+static int lua_reject_rsa_modulus(lua_State *L, size_t n_len)
+{
+    if (n_len == 64 || n_len == 128 || n_len == 256) {
+        return 0;
+    }
+    return luaL_error(L, "modulus must be 64, 128, or 256 bytes, got %d", (int) n_len);
+}
+
+static int lua_reject_rsa_public_exponent(lua_State *L, size_t e_len, size_t n_len)
+{
+    if (e_len >= 1 && e_len <= n_len) {
+        return 0;
+    }
+    return luaL_error(L, "public_exponent length must be 1..%d, got %d", (int) n_len, (int) e_len);
+}
+
+// Import N and E, and D when non-NULL. On failure the context is freed and this raises.
+// On success the caller must mbedtls_rsa_free(rsa).
+static void lua_rsa_setup(lua_State *L, mbedtls_rsa_context *rsa,
+                          const unsigned char *n, size_t n_len,
+                          const unsigned char *e, size_t e_len,
+                          const unsigned char *d, size_t d_len)
+{
+    if (!crypto_initialized) {
+        if (crypto_init() != ESP_OK) {
+            luaL_error(L, "Crypto initialization failed");
+            return;
+        }
+    }
+    mbedtls_rsa_init(rsa);
+    int ret = mbedtls_rsa_import_raw(rsa, n, n_len, NULL, 0, NULL, 0,
+                                     d, d ? d_len : 0, e, e_len);
+    if (ret == 0) {
+        ret = mbedtls_rsa_complete(rsa);
+    }
+    if (ret != 0) {
+        mbedtls_rsa_free(rsa);
+        luaL_error(L, "RSA key is invalid: -0x%04x", -ret);
+        return;
+    }
+    if (mbedtls_rsa_get_len(rsa) != n_len) {
+        mbedtls_rsa_free(rsa);
+        luaL_error(L, "modulus must not have leading zero bytes");
+    }
+}
+
+static int lua_aes_cbc_crypt(lua_State *L, int mode)
+{
+    size_t key_len, iv_len, data_len;
+    const unsigned char *key = (const unsigned char *) luaL_checklstring(L, 1, &key_len);
+    const unsigned char *iv = (const unsigned char *) luaL_checklstring(L, 2, &iv_len);
+    const unsigned char *data = (const unsigned char *) luaL_checklstring(L, 3, &data_len);
+
+    if (key_len != 16 && key_len != 32) {
+        return luaL_error(L, "key must be 16 or 32 bytes, got %d", (int) key_len);
+    }
+    if (iv_len != 16) {
+        return luaL_error(L, "iv must be exactly 16 bytes, got %d", (int) iv_len);
+    }
+    if (data_len == 0 || data_len > 4096 || (data_len % 16) != 0) {
+        return luaL_error(L, "data length must be a non-zero multiple of 16 and at most 4096, got %d",
+                          (int) data_len);
+    }
+
+    unsigned char iv_copy[16];
+    memcpy(iv_copy, iv, 16);
+
+    unsigned char *output = malloc(data_len);
+    if (!output) {
+        return luaL_error(L, "Memory allocation failed");
+    }
+
+    mbedtls_aes_context aes;
+    mbedtls_aes_init(&aes);
+    int ret = (mode == MBEDTLS_AES_ENCRYPT)
+              ? mbedtls_aes_setkey_enc(&aes, key, (unsigned) key_len * 8)
+              : mbedtls_aes_setkey_dec(&aes, key, (unsigned) key_len * 8);
+    if (ret != 0) {
+        mbedtls_aes_free(&aes);
+        free(output);
+        return luaL_error(L, "AES setkey failed: -0x%04x", -ret);
+    }
+
+    ret = mbedtls_aes_crypt_cbc(&aes, mode, data_len, iv_copy, data, output);
+    mbedtls_aes_free(&aes);
+    if (ret != 0) {
+        free(output);
+        return luaL_error(L, "AES-CBC failed: -0x%04x", -ret);
+    }
+
+    lua_pushlstring(L, (const char *) output, data_len);
+    free(output);
+    return 1;
+}
+
+int lua_aes_cbc_encrypt(lua_State *L)
+{
+    return lua_aes_cbc_crypt(L, MBEDTLS_AES_ENCRYPT);
+}
+
+int lua_aes_cbc_decrypt(lua_State *L)
+{
+    return lua_aes_cbc_crypt(L, MBEDTLS_AES_DECRYPT);
+}
+
+int lua_rsa_pkcs1_encrypt(lua_State *L)
+{
+    size_t n_len, e_len, plain_len;
+    const unsigned char *n = (const unsigned char *) luaL_checklstring(L, 1, &n_len);
+    const unsigned char *e = (const unsigned char *) luaL_checklstring(L, 2, &e_len);
+    const unsigned char *plain = (const unsigned char *) luaL_checklstring(L, 3, &plain_len);
+
+    lua_reject_rsa_modulus(L, n_len);
+    lua_reject_rsa_public_exponent(L, e_len, n_len);
+    if (plain_len == 0 || plain_len > n_len - 11) {
+        return luaL_error(L, "plaintext length must be 1..%d, got %d",
+                          (int) (n_len - 11), (int) plain_len);
+    }
+
+    mbedtls_rsa_context rsa;
+    lua_rsa_setup(L, &rsa, n, n_len, e, e_len, NULL, 0);
+
+    unsigned char *output = malloc(n_len);
+    if (!output) {
+        mbedtls_rsa_free(&rsa);
+        return luaL_error(L, "Memory allocation failed");
+    }
+
+    int ret = mbedtls_rsa_pkcs1_encrypt(&rsa, mbedtls_ctr_drbg_random, &ctr_drbg,
+                                        plain_len, plain, output);
+    mbedtls_rsa_free(&rsa);
+    if (ret != 0) {
+        free(output);
+        return luaL_error(L, "RSA encrypt failed: -0x%04x", -ret);
+    }
+
+    lua_pushlstring(L, (const char *) output, n_len);
+    free(output);
+    return 1;
+}
+
+int lua_rsa_pkcs1_decrypt(lua_State *L)
+{
+    size_t n_len, e_len, d_len, cipher_len;
+    const unsigned char *n = (const unsigned char *) luaL_checklstring(L, 1, &n_len);
+    const unsigned char *e = (const unsigned char *) luaL_checklstring(L, 2, &e_len);
+    const unsigned char *d = (const unsigned char *) luaL_checklstring(L, 3, &d_len);
+    const unsigned char *cipher = (const unsigned char *) luaL_checklstring(L, 4, &cipher_len);
+
+    lua_reject_rsa_modulus(L, n_len);
+    lua_reject_rsa_public_exponent(L, e_len, n_len);
+    if (d_len != n_len) {
+        return luaL_error(L, "private_exponent must be exactly %d bytes, got %d",
+                          (int) n_len, (int) d_len);
+    }
+    if (cipher_len != n_len) {
+        return luaL_error(L, "ciphertext must be exactly %d bytes, got %d",
+                          (int) n_len, (int) cipher_len);
+    }
+
+    mbedtls_rsa_context rsa;
+    lua_rsa_setup(L, &rsa, n, n_len, e, e_len, d, d_len);
+
+    unsigned char *output = malloc(n_len);
+    if (!output) {
+        mbedtls_rsa_free(&rsa);
+        return luaL_error(L, "Memory allocation failed");
+    }
+
+    size_t olen = 0;
+    int ret = mbedtls_rsa_pkcs1_decrypt(&rsa, mbedtls_ctr_drbg_random, &ctr_drbg,
+                                        &olen, cipher, output, n_len);
+    mbedtls_rsa_free(&rsa);
+    if (ret != 0) {
+        free(output);
+        return luaL_error(L, "PKCS#1 padding is invalid");
+    }
+
+    lua_pushlstring(L, (const char *) output, olen);
+    free(output);
+    return 1;
+}
+
+int lua_rsa_sha256_sign(lua_State *L)
+{
+    size_t n_len, e_len, d_len, msg_len;
+    const unsigned char *n = (const unsigned char *) luaL_checklstring(L, 1, &n_len);
+    const unsigned char *e = (const unsigned char *) luaL_checklstring(L, 2, &e_len);
+    const unsigned char *d = (const unsigned char *) luaL_checklstring(L, 3, &d_len);
+    const unsigned char *msg = (const unsigned char *) luaL_checklstring(L, 4, &msg_len);
+
+    lua_reject_rsa_modulus(L, n_len);
+    lua_reject_rsa_public_exponent(L, e_len, n_len);
+    if (d_len != n_len) {
+        return luaL_error(L, "private_exponent must be exactly %d bytes, got %d",
+                          (int) n_len, (int) d_len);
+    }
+    if (msg_len == 0 || msg_len > 4096) {
+        return luaL_error(L, "message length must be 1..4096, got %d", (int) msg_len);
+    }
+
+    unsigned char hash[32];
+    int ret = mbedtls_sha256(msg, msg_len, hash, 0);
+    if (ret != 0) {
+        return luaL_error(L, "SHA-256 failed: -0x%04x", -ret);
+    }
+
+    mbedtls_rsa_context rsa;
+    lua_rsa_setup(L, &rsa, n, n_len, e, e_len, d, d_len);
+
+    unsigned char *sig = malloc(n_len);
+    if (!sig) {
+        mbedtls_rsa_free(&rsa);
+        return luaL_error(L, "Memory allocation failed");
+    }
+
+    ret = mbedtls_rsa_pkcs1_sign(&rsa, mbedtls_ctr_drbg_random, &ctr_drbg,
+                                 MBEDTLS_MD_SHA256, 32, hash, sig);
+    mbedtls_rsa_free(&rsa);
+    if (ret != 0) {
+        free(sig);
+        return luaL_error(L, "RSA sign failed: -0x%04x", -ret);
+    }
+
+    lua_pushlstring(L, (const char *) sig, n_len);
+    free(sig);
+    return 1;
+}
+
+int lua_rsa_sha256_verify(lua_State *L)
+{
+    size_t n_len, e_len, msg_len, sig_len;
+    const unsigned char *n = (const unsigned char *) luaL_checklstring(L, 1, &n_len);
+    const unsigned char *e = (const unsigned char *) luaL_checklstring(L, 2, &e_len);
+    const unsigned char *msg = (const unsigned char *) luaL_checklstring(L, 3, &msg_len);
+    const unsigned char *sig = (const unsigned char *) luaL_checklstring(L, 4, &sig_len);
+
+    lua_reject_rsa_modulus(L, n_len);
+    lua_reject_rsa_public_exponent(L, e_len, n_len);
+    if (msg_len == 0 || msg_len > 4096) {
+        return luaL_error(L, "message length must be 1..4096, got %d", (int) msg_len);
+    }
+    if (sig_len != n_len) {
+        return luaL_error(L, "signature must be exactly %d bytes, got %d",
+                          (int) n_len, (int) sig_len);
+    }
+
+    unsigned char hash[32];
+    int ret = mbedtls_sha256(msg, msg_len, hash, 0);
+    if (ret != 0) {
+        return luaL_error(L, "SHA-256 failed: -0x%04x", -ret);
+    }
+
+    mbedtls_rsa_context rsa;
+    lua_rsa_setup(L, &rsa, n, n_len, e, e_len, NULL, 0);
+    ret = mbedtls_rsa_pkcs1_verify(&rsa, MBEDTLS_MD_SHA256, 32, hash, sig);
+    mbedtls_rsa_free(&rsa);
+
+    if (ret == 0) {
+        lua_pushboolean(L, 1);
+        return 1;
+    }
+    if (ret == MBEDTLS_ERR_RSA_VERIFY_FAILED || ret == MBEDTLS_ERR_RSA_INVALID_PADDING) {
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+    return luaL_error(L, "RSA verify failed: -0x%04x", -ret);
+}
+
+int lua_hmac_sha256(lua_State *L)
+{
+    size_t key_len, data_len;
+    const unsigned char *key = (const unsigned char *) luaL_checklstring(L, 1, &key_len);
+    const unsigned char *data = (const unsigned char *) luaL_checklstring(L, 2, &data_len);
+
+    if (key_len == 0 || key_len > 1024) {
+        return luaL_error(L, "key length must be 1..1024, got %d", (int) key_len);
+    }
+
+    const mbedtls_md_info_t *info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+    if (!info) {
+        return luaL_error(L, "SHA-256 is not available");
+    }
+
+    unsigned char output[32];
+    int ret = mbedtls_md_hmac(info, key, key_len, data, data_len, output);
+    if (ret != 0) {
+        return luaL_error(L, "HMAC-SHA256 failed: -0x%04x", -ret);
+    }
+
+    lua_pushlstring(L, (const char *) output, 32);
+    return 1;
+}
+
+int lua_aes_cmac(lua_State *L)
+{
+    size_t key_len, data_len;
+    const unsigned char *key = (const unsigned char *) luaL_checklstring(L, 1, &key_len);
+    const unsigned char *data = (const unsigned char *) luaL_checklstring(L, 2, &data_len);
+
+    if (key_len != 16) {
+        return luaL_error(L, "key must be exactly 16 bytes, got %d", (int) key_len);
+    }
+
+    const mbedtls_cipher_info_t *info = mbedtls_cipher_info_from_type(MBEDTLS_CIPHER_AES_128_ECB);
+    if (!info) {
+        return luaL_error(L, "AES-128-ECB is not available");
+    }
+
+    unsigned char output[16];
+    int ret = mbedtls_cipher_cmac(info, key, 128, data, data_len, output);
+    if (ret != 0) {
+        return luaL_error(L, "AES-CMAC failed: -0x%04x", -ret);
+    }
+
+    lua_pushlstring(L, (const char *) output, 16);
+    return 1;
+}
+
+int lua_xor_bytes(lua_State *L)
+{
+    size_t a_len, b_len;
+    const unsigned char *a = (const unsigned char *) luaL_checklstring(L, 1, &a_len);
+    const unsigned char *b = (const unsigned char *) luaL_checklstring(L, 2, &b_len);
+
+    if (a_len != b_len || a_len == 0 || a_len > 4096) {
+        return luaL_error(L, "xor_bytes arguments must be equal length, 1..4096, got %d and %d",
+                          (int) a_len, (int) b_len);
+    }
+
+    unsigned char *output = malloc(a_len);
+    if (!output) {
+        return luaL_error(L, "Memory allocation failed");
+    }
+    for (size_t i = 0; i < a_len; i++) {
+        output[i] = (unsigned char) (a[i] ^ b[i]);
+    }
+    lua_pushlstring(L, (const char *) output, a_len);
+    free(output);
+    return 1;
+}
+
+
+static int x25519_clamp(mbedtls_mpi *d)
+{
+    int ret = mbedtls_mpi_set_bit(d, 0, 0);
+    if (ret == 0) {
+        ret = mbedtls_mpi_set_bit(d, 1, 0);
+    }
+    if (ret == 0) {
+        ret = mbedtls_mpi_set_bit(d, 2, 0);
+    }
+    if (ret == 0) {
+        ret = mbedtls_mpi_set_bit(d, 255, 0);
+    }
+    if (ret == 0) {
+        ret = mbedtls_mpi_set_bit(d, 254, 1);
+    }
+    return ret;
+}
+
+// Lua: private_key, public_key = x25519_generate_keypair()
+// Both values are 32-byte little-endian strings. The scalar is clamped.
+int lua_x25519_generate_keypair(lua_State *L)
+{
+    if (!crypto_initialized) {
+        if (crypto_init() != ESP_OK) {
+            return luaL_error(L, "Crypto initialization failed");
+        }
+    }
+
+    mbedtls_ecp_group grp;
+    mbedtls_mpi d;
+    mbedtls_ecp_point q;
+    mbedtls_ecp_group_init(&grp);
+    mbedtls_mpi_init(&d);
+    mbedtls_ecp_point_init(&q);
+
+    int ret = mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_CURVE25519);
+    if (ret == 0) {
+        ret = mbedtls_ecdh_gen_public(&grp, &d, &q, mbedtls_ctr_drbg_random, &ctr_drbg);
+    }
+
+    unsigned char priv[32];
+    unsigned char pub[32];
+    size_t olen = 0;
+    if (ret == 0) {
+        ret = mbedtls_mpi_write_binary_le(&d, priv, sizeof(priv));
+    }
+    if (ret == 0) {
+        ret = mbedtls_ecp_point_write_binary(&grp, &q, MBEDTLS_ECP_PF_COMPRESSED,
+                                             &olen, pub, sizeof(pub));
+        if (ret == 0 && olen != sizeof(pub)) {
+            ret = MBEDTLS_ERR_ECP_BAD_INPUT_DATA;
+        }
+    }
+
+    mbedtls_ecp_point_free(&q);
+    mbedtls_mpi_free(&d);
+    mbedtls_ecp_group_free(&grp);
+    if (ret != 0) {
+        return luaL_error(L, "X25519 keypair generation failed: -0x%04x", -ret);
+    }
+
+    lua_pushlstring(L, (const char *) priv, sizeof(priv));
+    lua_pushlstring(L, (const char *) pub, sizeof(pub));
+    return 2;
+}
+
+// Lua: shared = x25519_compute_shared(private_key, peer_public_key)
+// Both inputs and the result are 32-byte little-endian strings.
+int lua_x25519_compute_shared(lua_State *L)
+{
+    size_t priv_len = 0;
+    size_t pub_len = 0;
+    const unsigned char *priv = (const unsigned char *) luaL_checklstring(L, 1, &priv_len);
+    const unsigned char *peer = (const unsigned char *) luaL_checklstring(L, 2, &pub_len);
+    if (priv_len != 32) {
+        return luaL_error(L, "private_key must be exactly 32 bytes, got %d", (int) priv_len);
+    }
+    if (pub_len != 32) {
+        return luaL_error(L, "peer_public_key must be exactly 32 bytes, got %d", (int) pub_len);
+    }
+    if (!crypto_initialized) {
+        if (crypto_init() != ESP_OK) {
+            return luaL_error(L, "Crypto initialization failed");
+        }
+    }
+
+    mbedtls_ecp_group grp;
+    mbedtls_mpi d;
+    mbedtls_ecp_point q;
+    mbedtls_mpi z;
+    mbedtls_ecp_group_init(&grp);
+    mbedtls_mpi_init(&d);
+    mbedtls_ecp_point_init(&q);
+    mbedtls_mpi_init(&z);
+
+    int ret = mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_CURVE25519);
+    if (ret == 0) {
+        ret = mbedtls_mpi_read_binary_le(&d, priv, priv_len);
+    }
+    if (ret == 0) {
+        ret = x25519_clamp(&d);
+    }
+    if (ret == 0) {
+        ret = mbedtls_ecp_point_read_binary(&grp, &q, peer, pub_len);
+    }
+    if (ret == 0) {
+        ret = mbedtls_ecdh_compute_shared(&grp, &z, &q, &d,
+                                          mbedtls_ctr_drbg_random, &ctr_drbg);
+    }
+
+    unsigned char shared[32];
+    if (ret == 0) {
+        ret = mbedtls_mpi_write_binary_le(&z, shared, sizeof(shared));
+    }
+
+    mbedtls_mpi_free(&z);
+    mbedtls_ecp_point_free(&q);
+    mbedtls_mpi_free(&d);
+    mbedtls_ecp_group_free(&grp);
+    if (ret != 0) {
+        return luaL_error(L, "X25519 computation failed: -0x%04x", -ret);
+    }
+
+    lua_pushlstring(L, (const char *) shared, sizeof(shared));
+    return 1;
+}
+
+
 void lua_crypto_register_functions(lua_State *L)
 {
    // Register cryptographic functions
     lua_register(L, "aes_ecb_encrypt", lua_aes_ecb_encrypt);
     lua_register(L, "aes_ecb_decrypt", lua_aes_ecb_decrypt);
+    lua_register(L, "aes_cbc_encrypt", lua_aes_cbc_encrypt);
+    lua_register(L, "aes_cbc_decrypt", lua_aes_cbc_decrypt);
     lua_register(L, "sha256", lua_sha256);
     lua_register(L, "sha256_first_16", lua_sha256_first_16);
     lua_register(L, "ecdh_generate_keypair", lua_ecdh_generate_keypair);
     lua_register(L, "ecdh_compute_shared", lua_ecdh_compute_shared);
+    lua_register(L, "x25519_generate_keypair", lua_x25519_generate_keypair);
+    lua_register(L, "x25519_compute_shared", lua_x25519_compute_shared);
     lua_register(L, "random_bytes", lua_random_bytes);
+    lua_register(L, "rsa_pkcs1_encrypt", lua_rsa_pkcs1_encrypt);
+    lua_register(L, "rsa_pkcs1_decrypt", lua_rsa_pkcs1_decrypt);
+    lua_register(L, "rsa_sha256_sign", lua_rsa_sha256_sign);
+    lua_register(L, "rsa_sha256_verify", lua_rsa_sha256_verify);
+    lua_register(L, "hmac_sha256", lua_hmac_sha256);
+    lua_register(L, "aes_cmac", lua_aes_cmac);
+    lua_register(L, "xor_bytes", lua_xor_bytes);
 
     ESP_LOGI(TAG, "Lua crypto functions registered");
 }
