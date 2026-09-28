@@ -33,11 +33,24 @@ Peripheral **GATT `dynamic` hooks** in JSON (`on_read`, `on_write`, …) can cal
 | **Crypto** | |
 | `aes_ecb_encrypt(key16, block16)` → binary | AES-128-ECB encrypt (exactly 16-byte key and block). |
 | `aes_ecb_decrypt(key16, block16)` → binary | AES-128-ECB decrypt. |
+| `aes_cbc_encrypt(key, iv, data)` → binary | AES-CBC encrypt. Key 16 or 32 bytes, IV 16 bytes, data a non-zero multiple of 16 and at most 4096. No padding. |
+| `aes_cbc_decrypt(key, iv, data)` → binary | AES-CBC decrypt with the same length rules. No padding. |
 | `sha256(data)` → 32-byte binary | Full SHA-256 digest. |
 | `sha256_first_16(data)` → 16-byte binary | First 16 bytes of SHA-256. |
 | `ecdh_generate_keypair()` → priv32, pub64 | secp256r1; `pub64` is X‖Y without `0x04` prefix. |
 | `ecdh_compute_shared(priv32, peer_pub64)` → shared32 | 32-byte shared secret. |
+| `x25519_generate_keypair()` → priv32, pub32 | X25519; both values are 32-byte little-endian strings. The private scalar is clamped. |
+| `x25519_compute_shared(private_key, peer_public_key)` → shared32 | X25519 shared secret. Both inputs 32 bytes. A wrong length raises. |
+| `rsa_pkcs1_encrypt(modulus, public_exponent, plaintext)` → binary | PKCS#1 v1.5 type 2 encrypt. Modulus 64, 128, or 256 raw bytes (no leading `0x00`). Public exponent big-endian (often 3 bytes `010001`). Plaintext 1..modulus−11. Output is one modulus-sized block. |
+| `rsa_pkcs1_decrypt(modulus, public_exponent, private_exponent, ciphertext)` → binary | PKCS#1 v1.5 decrypt. Private exponent and ciphertext lengths equal the modulus. Returns the unpadded plaintext. A bad length or bad padding raises. |
+| `rsa_sha256_sign(modulus, public_exponent, private_exponent, message)` → binary | SHA-256 over the raw message, then RSASSA-PKCS1-v1_5. Message 1..4096. Output length equals the modulus. |
+| `rsa_sha256_verify(modulus, public_exponent, message, signature)` → bool | Same encoding. A wrong signature is `false`. A wrong length raises. |
+| `hmac_sha256(key, data)` → binary | HMAC-SHA256. Key 1..1024 bytes. Output 32 bytes. |
+| `aes_cmac(key, data)` → binary | AES-128-CMAC. Key exactly 16 bytes. Output 16 bytes. An empty message is valid. |
+| `xor_bytes(a, b)` → binary | Byte-wise XOR of two equal-length strings, 1..4096. |
 | `random_bytes(n)` → binary | Hardware RNG; `n` in 1..1024. |
+
+Crypto arguments are **binary** Lua strings. AES-CBC does not add or remove padding; PKCS#5/PKCS#7 stays in the script, as does a leading `0x00` on a longer GATT write. RSA helpers take a raw modulus and exponent, not an X.509 key (store those values in `vars.json`). A modulus with leading zero bytes raises. `ecdh_*` is secp256r1 and returns a 64-byte point; X25519 is a separate helper and those keys do not interoperate.
 
 `bin_to_hex`, `bits.tohex`, and `hex.*` packers emit **lowercase** hex. Decoders accept mixed case.
 
