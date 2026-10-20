@@ -44,6 +44,20 @@ void ble_sim_stop_all_ext_adv(void)
     }
 }
 
+// globals (to be accessed from other files)
+ble_server_t *ble_server;
+
+static void ble_sim_mark_adv_unconfigured(void)
+{
+    if (!ble_server || !ble_server->adv_set.instances) return;
+    for (uint8_t i = 0; i < ble_server->adv_set.count; i++) {
+        ble_server->adv_set.instances[i].configured = false;
+        ble_server->adv_set.instances[i].adv_data_set = false;
+        ble_server->adv_set.instances[i].scan_rsp_set = false;
+        ble_server->adv_set.instances[i].running = false;
+    }
+}
+
 void ble_sim_clear_ext_adv_sets(void)
 {
     int rc = ble_gap_ext_adv_clear();
@@ -52,23 +66,28 @@ void ble_sim_clear_ext_adv_sets(void)
         vTaskDelay(pdMS_TO_TICKS(200));
         rc = ble_gap_ext_adv_clear();
     }
-    if (rc != 0 && rc != BLE_HS_EALREADY) {
-        WS_LOGW(TAG, "ble_gap_ext_adv_clear rc=%d — trying per-instance remove", rc);
-        for (int i = 0; i < CONFIG_BT_NIMBLE_MAX_EXT_ADV_INSTANCES; i++) {
-            int rm = ble_gap_ext_adv_remove(i);
-            if (rm != 0 && rm != BLE_HS_EALREADY && rm != BLE_HS_ENOENT) {
-                WS_LOGW(TAG, "ble_gap_ext_adv_remove(%d) rc=%d", i, rm);
-            }
+    if (rc == 0 || rc == BLE_HS_EALREADY) {
+        ble_sim_mark_adv_unconfigured();
+        return;
+    }
+
+    WS_LOGW(TAG, "ble_gap_ext_adv_clear rc=%d — trying per-instance remove", rc);
+    bool all_removed = true;
+    for (int i = 0; i < CONFIG_BT_NIMBLE_MAX_EXT_ADV_INSTANCES; i++) {
+        int rm = ble_gap_ext_adv_remove(i);
+        if (rm != 0 && rm != BLE_HS_EALREADY && rm != BLE_HS_ENOENT) {
+            all_removed = false;
+            WS_LOGW(TAG, "ble_gap_ext_adv_remove(%d) rc=%d", i, rm);
         }
+    }
+    if (all_removed) {
+        ble_sim_mark_adv_unconfigured();
     }
 }
 
 // forward declarations
 void ble_store_config_init(void);
 esp_err_t stop_ble_simulation(void);
-
-// globals (to be accessed from other files)
-ble_server_t *ble_server;
 
 // ── BLE simulation ────────────────────────────────────────────────── 
 

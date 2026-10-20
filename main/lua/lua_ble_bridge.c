@@ -107,8 +107,23 @@ static bool handle_to_uuid_strs(uint16_t attr_handle,
 
 // ── Advertisements ────────────────────────────────────────────────── 
 
+static int lua_adv_set_fail(lua_State *L, const char *profile_id, const char *what,
+                            unsigned len, const ble_adv_instance_t *inst, int rc)
+{
+    lua_pushboolean(L, 0);
+    lua_pushfstring(L,
+                    "adv_set_data: profile '%s' %s (len=%u legacy=%d scannable=%d rc=%d)",
+                    profile_id, what, len,
+                    inst->params.legacy_pdu ? 1 : 0,
+                    inst->params.scannable ? 1 : 0,
+                    rc);
+    return 2;
+}
+
 // adv_set_data(profile_id, adv_hex [, scan_rsp_hex])
-// adv_hex and scan_rsp_hex are hex strings, scan_rsp_hex is optional (nil = don't update)
+// adv_hex and scan_rsp_hex are hex strings, scan_rsp_hex is optional (nil = don't update).
+// Configures the set from adv.json when boot skipped it. Does not start advertising.
+// Returns true, or false + error string if configure or the data write is rejected.
 static int lua_adv_set_data(lua_State *L)
 {
     const char *profile_id  = luaL_checkstring(L, 1);
@@ -131,6 +146,14 @@ static int lua_adv_set_data(lua_State *L)
         return luaL_error(L, "adv_set_data: profile '%s' not found", profile_id);
     }
 
+    if (!inst->configured) {
+        unsigned hint_len = (adv_hex && adv_hex[0] != '\0') ? (unsigned)(strlen(adv_hex) / 2) : 0;
+        int crc = ble_adv_instance_configure(inst);
+        if (crc != 0) {
+            return lua_adv_set_fail(L, profile_id, "configure failed", hint_len, inst, crc);
+        }
+    }
+
     // --- adv data ---
     if (adv_hex && adv_hex[0] != '\0') {
         uint16_t adv_len = (uint16_t)(strlen(adv_hex) / 2);
@@ -151,8 +174,9 @@ static int lua_adv_set_data(lua_State *L)
         int rc = ble_gap_ext_adv_set_data(inst->instance, om);
         // NimBLE takes ownership of om even on failure
         if (rc != 0) {
-            return luaL_error(L, "adv_set_data: ble_gap_ext_adv_set_data failed %d", rc);
+            return lua_adv_set_fail(L, profile_id, "rejected advertising data", adv_len, inst, rc);
         }
+        inst->adv_data_set = true;
         ESP_LOGI(TAG, "adv_set_data: updated adv on '%s' (%d bytes)", profile_id, adv_len);
     }
 
@@ -175,8 +199,9 @@ static int lua_adv_set_data(lua_State *L)
 
         int rc = ble_gap_ext_adv_rsp_set_data(inst->instance, om);
         if (rc != 0) {
-            return luaL_error(L, "adv_set_data: ble_gap_ext_adv_rsp_set_data failed %d", rc);
+            return lua_adv_set_fail(L, profile_id, "rejected scan response", rsp_len, inst, rc);
         }
+        inst->scan_rsp_set = true;
         ESP_LOGI(TAG, "adv_set_data: updated scan_rsp on '%s' (%d bytes)", profile_id, rsp_len);
     }
 

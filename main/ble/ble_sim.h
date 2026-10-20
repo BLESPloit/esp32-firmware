@@ -12,6 +12,9 @@ void ble_adv_set_free(ble_adv_set_t *set);
 cJSON *ble_adv_set_to_json(void);
 
 // needed by lua to enable/disable advertising profile
+// Configure the NimBLE advertising set and address. Does not load payload or start.
+// Returns 0 on success (including already configured / already advertising), else the NimBLE rc.
+int         ble_adv_instance_configure(ble_adv_instance_t *inst);
 esp_err_t   ble_adv_instance_start(ble_adv_instance_t *inst);
 
 /**

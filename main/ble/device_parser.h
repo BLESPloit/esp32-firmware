@@ -106,6 +106,9 @@ typedef struct {
     uint8_t           instance;
     bool              running;
     bool              initially_enabled;
+    bool              configured;      // NimBLE set exists; not cleared by adv stop
+    bool              adv_data_set;    // controller has advertising data
+    bool              scan_rsp_set;    // controller has a scan response
     TimerHandle_t     rotation_timer;  // NULL if no rotation
 } ble_adv_instance_t;
 

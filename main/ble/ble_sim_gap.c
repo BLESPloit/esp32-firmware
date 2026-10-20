@@ -523,16 +523,15 @@ cJSON *ble_adv_set_to_json(void)
 
 // ── Advertising start/stop ────────────────────────────────────────────────── 
 
-esp_err_t ble_adv_instance_start(ble_adv_instance_t *inst)
+int ble_adv_instance_configure(ble_adv_instance_t *inst)
 {
     ble_adv_params_t *p = &inst->params;
 
-    if (ble_gap_ext_adv_active(inst->instance)) {
-        ESP_LOGI(TAG, "Instance %d (%s) already advertising", inst->instance, p->id);
-        return ESP_OK;
+    if (inst->configured || ble_gap_ext_adv_active(inst->instance)) {
+        inst->configured = true;
+        return 0;
     }
 
-    // --- Resolve own_addr_type before configure ---
     uint8_t own_addr_type;
     switch (p->addr_type) {
         case BLE_ADV_ADDR_PUBLIC_HARDWARE:
@@ -566,10 +565,9 @@ esp_err_t ble_adv_instance_start(ble_adv_instance_t *inst)
                  "(legacy=%d conn=%d scan=%d pphy=%d sphy=%d)",
                  rc, adv_params.legacy_pdu, adv_params.connectable,
                  adv_params.scannable, adv_params.primary_phy, adv_params.secondary_phy);
-        return ESP_FAIL;
+        return rc;
     }
 
-    // Set address
     switch (p->addr_type) {
         case BLE_ADV_ADDR_RANDOM_GENERATED:
             rc = ble_generate_and_set_random_addr(inst->instance, p);
@@ -595,40 +593,70 @@ esp_err_t ble_adv_instance_start(ble_adv_instance_t *inst)
     }
     if (rc != 0) {
         WS_LOGE(TAG, "Failed to set address for profile '%s', aborting!", p->id);
-        return ESP_FAIL;
-    }
-
-    // Set adv data 
-    struct os_mbuf *data = os_msys_get_pkthdr(p->adv_data_len, 0);
-    if (!data) {
-        WS_LOGE(TAG, "Failed to alloc adv data mbuf (instance %d)", inst->instance);
-        return ESP_ERR_NO_MEM;
-    }
-    rc = os_mbuf_append(data, p->adv_data, p->adv_data_len);
-    if (rc != 0) { os_mbuf_free_chain(data); return rc; }
-    rc = ble_gap_ext_adv_set_data(inst->instance, data);
-    if (rc != 0) {
-        ESP_LOGE(TAG, "ble_gap_ext_adv_set_data failed rc=%d (instance=%d "
-                 "legacy=%d conn=%d scan=%d adv_data_len=%d)",
-                 rc, inst->instance,
-                 p->legacy_pdu, p->connectable, p->scannable, p->adv_data_len);
         return rc;
     }
 
-    // Set scan response (if present)
-    if (p->scan_rsp && p->scan_rsp_len > 0) {
+    inst->configured = true;
+    return 0;
+}
+
+esp_err_t ble_adv_instance_start(ble_adv_instance_t *inst)
+{
+    ble_adv_params_t *p = &inst->params;
+
+    if (ble_gap_ext_adv_active(inst->instance)) {
+        inst->configured = true;
+        ESP_LOGI(TAG, "Instance %d (%s) already advertising", inst->instance, p->id);
+        return ESP_OK;
+    }
+
+    int rc = 0;
+    if (!inst->configured) {
+        rc = ble_adv_instance_configure(inst);
+        if (rc != 0) return ESP_FAIL;
+    }
+
+    // Load adv.json only for fields Lua has not already written. Configuring
+    // the set does not by itself put a payload in the controller.
+    if (!inst->adv_data_set) {
+        struct os_mbuf *data = os_msys_get_pkthdr(p->adv_data_len, 0);
+        if (!data) {
+            WS_LOGE(TAG, "Failed to alloc adv data mbuf (instance %d)", inst->instance);
+            return ESP_ERR_NO_MEM;
+        }
+        rc = os_mbuf_append(data, p->adv_data, p->adv_data_len);
+        if (rc != 0) {
+            os_mbuf_free_chain(data);
+            return rc;
+        }
+        rc = ble_gap_ext_adv_set_data(inst->instance, data);
+        if (rc != 0) {
+            ESP_LOGE(TAG, "ble_gap_ext_adv_set_data failed rc=%d (instance=%d "
+                     "legacy=%d conn=%d scan=%d adv_data_len=%d)",
+                     rc, inst->instance,
+                     p->legacy_pdu, p->connectable, p->scannable, p->adv_data_len);
+            return rc;
+        }
+        inst->adv_data_set = true;
+    }
+
+    if (!inst->scan_rsp_set && p->scan_rsp && p->scan_rsp_len > 0) {
         struct os_mbuf *rsp = os_msys_get_pkthdr(p->scan_rsp_len, 0);
         if (!rsp) {
             ESP_LOGE(TAG, "Failed to alloc scan rsp mbuf (instance %d)", inst->instance);
             return ESP_ERR_NO_MEM;
         }
         rc = os_mbuf_append(rsp, p->scan_rsp, p->scan_rsp_len);
-        if (rc != 0) { os_mbuf_free_chain(rsp); return rc; }
+        if (rc != 0) {
+            os_mbuf_free_chain(rsp);
+            return rc;
+        }
         rc = ble_gap_ext_adv_rsp_set_data(inst->instance, rsp);
         if (rc != 0) {
             ESP_LOGE(TAG, "Error setting scan response %d", rc);
             return rc;
         }
+        inst->scan_rsp_set = true;
     }
 
     // Start
@@ -641,16 +669,19 @@ esp_err_t ble_adv_instance_start(ble_adv_instance_t *inst)
     WS_LOGI(TAG, "Instance %d (%s) started — %s", inst->instance, p->id,
              p->rotation ? "rotating" : "static");
 
-    // Start rotation timer if needed
+    // Start rotation timer if needed. A later start of an already configured
+    // instance reuses the timer instead of creating another one.
     if (p->rotation && p->rotation->count >= 2) {
-        TickType_t period = pdMS_TO_TICKS(p->rotation->interval_ms);
-        inst->rotation_timer = xTimerCreate(
-            "adv_rot", period, pdTRUE,
-            (void *)inst, rotation_timer_cb);
+        if (!inst->rotation_timer) {
+            TickType_t period = pdMS_TO_TICKS(p->rotation->interval_ms);
+            inst->rotation_timer = xTimerCreate(
+                "adv_rot", period, pdTRUE,
+                (void *)inst, rotation_timer_cb);
+            if (!inst->rotation_timer)
+                ESP_LOGE(TAG, "Failed to create rotation timer for instance %d", inst->instance);
+        }
         if (inst->rotation_timer)
             xTimerStart(inst->rotation_timer, 0);
-        else
-            ESP_LOGE(TAG, "Failed to create rotation timer for instance %d", inst->instance);
     }
 
     return ESP_OK;
