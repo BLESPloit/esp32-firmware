@@ -6,6 +6,8 @@ int lua_aes_ecb_encrypt(lua_State* L);
 int lua_aes_ecb_decrypt(lua_State* L);
 int lua_aes_cbc_encrypt(lua_State* L);
 int lua_aes_cbc_decrypt(lua_State* L);
+int lua_aes_gcm_encrypt(lua_State* L);
+int lua_aes_gcm_decrypt(lua_State* L);
 int lua_sha256(lua_State* L);
 int lua_sha256_first_16(lua_State* L);
 int lua_ecdh_generate_keypair(lua_State* L);

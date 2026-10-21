@@ -20,6 +20,7 @@
 #include "mbedtls/rsa.h"
 #include "mbedtls/cipher.h"
 #include "mbedtls/cmac.h"
+#include "mbedtls/gcm.h"
 #include <stdlib.h>
 
 #define TAG "LUA crypto"
@@ -508,6 +509,131 @@ int lua_aes_cbc_decrypt(lua_State *L)
     return lua_aes_cbc_crypt(L, MBEDTLS_AES_DECRYPT);
 }
 
+static int lua_gcm_tag_len(lua_State *L)
+{
+    lua_Integer n = luaL_checkinteger(L, 5);
+    if (n != 12 && n != 16) {
+        return luaL_error(L, "tag_len must be 12 or 16, got %d", (int) n);
+    }
+    return (int) n;
+}
+
+static int lua_aes_gcm(lua_State *L, int encrypt)
+{
+    size_t key_len, iv_len, data_len, aad_len;
+    const unsigned char *key = (const unsigned char *) luaL_checklstring(L, 1, &key_len);
+    const unsigned char *iv = (const unsigned char *) luaL_checklstring(L, 2, &iv_len);
+    const unsigned char *data = (const unsigned char *) luaL_checklstring(L, 3, &data_len);
+    const unsigned char *aad = (const unsigned char *) luaL_checklstring(L, 4, &aad_len);
+
+    if (key_len != 16) {
+        return luaL_error(L, "key must be exactly 16 bytes, got %d", (int) key_len);
+    }
+    if (iv_len != 12) {
+        return luaL_error(L, "iv must be exactly 12 bytes, got %d", (int) iv_len);
+    }
+    if (encrypt && data_len > 4096) {
+        return luaL_error(L, "plaintext length must be 0..4096, got %d", (int) data_len);
+    }
+    if (aad_len > 4096) {
+        return luaL_error(L, "aad length must be 0..4096, got %d", (int) aad_len);
+    }
+    int tag_len = lua_gcm_tag_len(L);
+
+    size_t body_len;
+    const unsigned char *tag = NULL;
+    if (encrypt) {
+        body_len = data_len;
+    } else {
+        if (data_len < (size_t) tag_len || data_len > 4096u + (size_t) tag_len) {
+            return luaL_error(L, "data length must be %d..%d, got %d",
+                              tag_len, 4096 + tag_len, (int) data_len);
+        }
+        body_len = data_len - (size_t) tag_len;
+        tag = data + body_len;
+    }
+
+    // Heap, not the 8 KB Lua task stack. The context holds the GHASH table. 
+    mbedtls_gcm_context *ctx = calloc(1, sizeof(*ctx));
+    if (!ctx) {
+        return luaL_error(L, "Memory allocation failed");
+    }
+    mbedtls_gcm_init(ctx);
+    int ret = mbedtls_gcm_setkey(ctx, MBEDTLS_CIPHER_ID_AES, key, 128);
+    if (ret != 0) {
+        mbedtls_gcm_free(ctx);
+        free(ctx);
+        return luaL_error(L, "AES-GCM setkey failed: -0x%04x", -ret);
+    }
+
+    unsigned char scratch = 0;
+    const unsigned char *in_ptr = body_len ? data : &scratch;
+    const unsigned char *aad_ptr = aad_len ? aad : NULL;
+
+    if (encrypt) {
+        unsigned char *output = malloc(body_len + (size_t) tag_len);
+        if (!output) {
+            mbedtls_gcm_free(ctx);
+            free(ctx);
+            return luaL_error(L, "Memory allocation failed");
+        }
+        ret = mbedtls_gcm_crypt_and_tag(ctx, MBEDTLS_GCM_ENCRYPT, body_len,
+                                        iv, 12, aad_ptr, aad_len,
+                                        in_ptr, body_len ? output : &scratch,
+                                        (size_t) tag_len, output + body_len);
+        mbedtls_gcm_free(ctx);
+        free(ctx);
+        if (ret != 0) {
+            free(output);
+            return luaL_error(L, "AES-GCM failed: -0x%04x", -ret);
+        }
+        lua_pushlstring(L, (const char *) output, body_len + (size_t) tag_len);
+        free(output);
+        return 1;
+    }
+
+    unsigned char *plain = body_len ? malloc(body_len) : &scratch;
+    if (body_len && !plain) {
+        mbedtls_gcm_free(ctx);
+        free(ctx);
+        return luaL_error(L, "Memory allocation failed");
+    }
+    ret = mbedtls_gcm_auth_decrypt(ctx, body_len, iv, 12, aad_ptr, aad_len,
+                                   tag, (size_t) tag_len, in_ptr, plain);
+    mbedtls_gcm_free(ctx);
+    free(ctx);
+    if (ret == MBEDTLS_ERR_GCM_AUTH_FAILED) {
+        if (body_len) {
+            free(plain);
+        }
+        lua_pushnil(L);
+        return 1;
+    }
+    if (ret != 0) {
+        if (body_len) {
+            free(plain);
+        }
+        return luaL_error(L, "AES-GCM failed: -0x%04x", -ret);
+    }
+    if (body_len == 0) {
+        lua_pushlstring(L, "", 0);
+    } else {
+        lua_pushlstring(L, (const char *) plain, body_len);
+        free(plain);
+    }
+    return 1;
+}
+
+int lua_aes_gcm_encrypt(lua_State *L)
+{
+    return lua_aes_gcm(L, 1);
+}
+
+int lua_aes_gcm_decrypt(lua_State *L)
+{
+    return lua_aes_gcm(L, 0);
+}
+
 int lua_rsa_pkcs1_encrypt(lua_State *L)
 {
     size_t n_len, e_len, plain_len;
@@ -881,6 +1007,8 @@ void lua_crypto_register_functions(lua_State *L)
     lua_register(L, "aes_ecb_decrypt", lua_aes_ecb_decrypt);
     lua_register(L, "aes_cbc_encrypt", lua_aes_cbc_encrypt);
     lua_register(L, "aes_cbc_decrypt", lua_aes_cbc_decrypt);
+    lua_register(L, "aes_gcm_encrypt", lua_aes_gcm_encrypt);
+    lua_register(L, "aes_gcm_decrypt", lua_aes_gcm_decrypt);
     lua_register(L, "sha256", lua_sha256);
     lua_register(L, "sha256_first_16", lua_sha256_first_16);
     lua_register(L, "ecdh_generate_keypair", lua_ecdh_generate_keypair);

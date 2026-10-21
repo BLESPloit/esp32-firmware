@@ -35,6 +35,8 @@ Peripheral **GATT `dynamic` hooks** in JSON (`on_read`, `on_write`, …) can cal
 | `aes_ecb_decrypt(key16, block16)` → binary | AES-128-ECB decrypt. |
 | `aes_cbc_encrypt(key, iv, data)` → binary | AES-CBC encrypt. Key 16 or 32 bytes, IV 16 bytes, data a non-zero multiple of 16 and at most 4096. No padding. |
 | `aes_cbc_decrypt(key, iv, data)` → binary | AES-CBC decrypt with the same length rules. No padding. |
+| `aes_gcm_encrypt(key, iv, plaintext, aad, tag_len)` → binary | AES-128-GCM encrypt. Key is 16 bytes. IV is 12 bytes and is not generated or prepended. Plaintext is 0..4096 bytes. AAD is 0..4096 bytes; `""` means no AAD. `tag_len` is 12 or 16. Output is ciphertext followed by the tag. A 12-byte tag is the leading 12 bytes of the 16-byte tag. A bad length raises. |
+| `aes_gcm_decrypt(key, iv, data, aad, tag_len)` → binary or nil | AES-128-GCM decrypt. `data` is ciphertext followed by the tag. The ciphertext portion is 0..4096 bytes. A bad tag returns nil and no plaintext. A bad length raises. |
 | `sha256(data)` → 32-byte binary | Full SHA-256 digest. |
 | `sha256_first_16(data)` → 16-byte binary | First 16 bytes of SHA-256. |
 | `ecdh_generate_keypair()` → priv32, pub64 | secp256r1; `pub64` is X‖Y without `0x04` prefix. |
@@ -50,7 +52,7 @@ Peripheral **GATT `dynamic` hooks** in JSON (`on_read`, `on_write`, …) can cal
 | `xor_bytes(a, b)` → binary | Byte-wise XOR of two equal-length strings, 1..4096. |
 | `random_bytes(n)` → binary | Hardware RNG; `n` in 1..1024. |
 
-Crypto arguments are **binary** Lua strings. AES-CBC does not add or remove padding; PKCS#5/PKCS#7 stays in the script, as does a leading `0x00` on a longer GATT write. RSA helpers take a raw modulus and exponent, not an X.509 key (store those values in `vars.json`). A modulus with leading zero bytes raises. `ecdh_*` is secp256r1 and returns a 64-byte point; X25519 is a separate helper and those keys do not interoperate.
+Crypto arguments are **binary** Lua strings. AES-CBC does not add or remove padding; PKCS#5/PKCS#7 stays in the script, as does a leading `0x00` on a longer GATT write. AES-GCM framing, including the IV and any bytes around the ciphertext, also stays in the script. RSA helpers take a raw modulus and exponent, not an X.509 key (store those values in `vars.json`). A modulus with leading zero bytes raises. `ecdh_*` is secp256r1 and returns a 64-byte point; X25519 is a separate helper and those keys do not interoperate.
 
 `bin_to_hex`, `bits.tohex`, and `hex.*` packers emit **lowercase** hex. Decoders accept mixed case.
 
