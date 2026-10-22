@@ -272,10 +272,13 @@ static bool parse_adv_profile_entry(cJSON *item, ble_adv_instance_t *inst, uint8
     cJSON *ba = cJSON_GetObjectItem(item, "bd_addr");
     if (cJSON_IsString(ba) && strlen(ba->valuestring) > 0) {
         strlcpy(p->bd_addr, ba->valuestring, sizeof(p->bd_addr));
+    } else if (p->addr_type == BLE_ADV_ADDR_RANDOM_GENERATED) {
+        // Generated when the instance is configured. No stored address is required.
+        p->bd_addr[0] = '\0';
     } else if (ble_server->devinfo && p->addr_type != BLE_ADV_ADDR_PUBLIC_HARDWARE) {
         strlcpy(p->bd_addr, ble_server->devinfo->bd_addr, sizeof(p->bd_addr));
     } else {
-        // No devinfo / public_hardware without profile bd_addr — TX addr comes from controller
+        // random_specific / public need a concrete address. public_hardware uses the controller.
         if (p->addr_type != BLE_ADV_ADDR_PUBLIC_HARDWARE)
             p->addr_type = BLE_ADV_ADDR_PUBLIC_HARDWARE;
         p->bd_addr[0] = '\0';
