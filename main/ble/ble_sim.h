@@ -11,6 +11,9 @@ void ble_adv_set_free(ble_adv_set_t *set);
 
 cJSON *ble_adv_set_to_json(void);
 
+// Redraw the top "_adv_addr" overlay for this profile when the manifest asked for it.
+void        ble_sim_refresh_adv_address(const ble_adv_instance_t *inst);
+
 // needed by lua to enable/disable advertising profile
 // Configure the NimBLE advertising set and address. Does not load payload or start.
 // Returns 0 on success (including already configured / already advertising), else the NimBLE rc.

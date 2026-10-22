@@ -266,6 +266,7 @@ static int lua_adv_enable(lua_State *L) {
 
     if (ble_gap_ext_adv_active(inst->instance)) {
         ESP_LOGI(TAG, "adv_enable: instance %d (%s) already running", inst->instance, profile_id);
+        ble_sim_refresh_adv_address(inst);
         lua_pushboolean(L, 1);
         return 1;
     }
@@ -286,6 +287,7 @@ static int lua_adv_enable(lua_State *L) {
     }
 
     ESP_LOGI(TAG, "adv_enable: started profile '%s' on instance %d", profile_id, inst->instance);
+    ble_sim_refresh_adv_address(inst);
     lua_pushboolean(L, 1);
     return 1;
 }
