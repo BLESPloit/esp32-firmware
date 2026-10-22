@@ -6,9 +6,11 @@
 #include <lauxlib.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_random.h"
+#include "esp_timer.h"
 
 #include "graphics/graphics.h"
 #include "interface/interface_central.h"
@@ -31,6 +33,20 @@ static lua_State *g_lua_state = NULL;
 // queue
 static QueueHandle_t lua_event_queue = NULL;
 static TaskHandle_t lua_task_handle = NULL;
+
+// One armed delay() timer. Cancelled before the queue is deleted.
+static SemaphoreHandle_t s_delay_mu;
+static esp_timer_handle_t s_delay_timer;
+static char *s_delay_arg;
+static bool s_lua_delay_closed;
+
+static SemaphoreHandle_t lua_delay_lock(void)
+{
+    if (!s_delay_mu) {
+        s_delay_mu = xSemaphoreCreateMutex();
+    }
+    return s_delay_mu;
+}
 
 
 bool lua_is_task_running(void) {
@@ -63,16 +79,93 @@ static int lua_get_time(lua_State* L) {
 // ── Delayed execution ────────────────────────────────────────────────── 
 
 // Timer callback — fires from esp_timer task (NOT lua_task)
-// Must not touch lua_State; only posts to the queue
+// Must not touch lua_State; only posts to the queue.
+// Delivery and handle ownership both require this callback to still be the
+// armed slot. Cleanup nulls that slot, so a late callback cannot post into
+// a later session or delete a handle cleanup already took.
 static void lua_delay_timer_cb(void *arg) {
-    lua_event_t event = {0};
-    event.type = LUA_EVENT_DELAYED_CALL;
-    // arg is a heap-allocated function name string
-    strncpy(event.func_name, (const char *)arg, sizeof(event.func_name) - 1);
-    free(arg);  // safe to free here, funcname was copied
+    esp_timer_handle_t done = NULL;
+    SemaphoreHandle_t mu = lua_delay_lock();
+    if (mu && xSemaphoreTake(mu, portMAX_DELAY) == pdTRUE) {
+        if (s_delay_arg == arg && !s_lua_delay_closed && lua_event_queue) {
+            lua_event_t event = {0};
+            event.type = LUA_EVENT_DELAYED_CALL;
+            if (arg) {
+                strncpy(event.func_name, (const char *)arg, sizeof(event.func_name) - 1);
+            }
+            if (xQueueSend(lua_event_queue, &event, 0) != pdTRUE) {
+                ESP_LOGW(TAG, "Lua delay queue full, dropping callback: %s", event.func_name);
+            }
+        }
+        if (s_delay_arg == arg) {
+            done = s_delay_timer;
+            s_delay_timer = NULL;
+            s_delay_arg = NULL;
+        }
+        xSemaphoreGive(mu);
+    }
+    free(arg);
+    // One-shot has already left the armed list. Delete here so the handle
+    // does not wait for the next delay() or for cleanup.
+    if (done) {
+        esp_err_t del = esp_timer_delete(done);
+        if (del != ESP_OK) {
+            ESP_LOGW(TAG, "lua delay timer delete failed: %d", del);
+        }
+    }
+}
 
-    if (xQueueSend(lua_event_queue, &event, pdMS_TO_TICKS(50)) != pdTRUE) {
-        ESP_LOGW(TAG, "Lua delay queue full, dropping callback: %s", event.func_name);
+// Stop the armed delay timer before lua_event_queue is deleted.
+// esp_timer_stop succeeding means the callback will not run, so this side
+// owns arg. An expired one-shot returns ESP_ERR_INVALID_STATE from stop and
+// still has to be deleted; its callback owns arg.
+static void lua_delay_cancel_pending(void)
+{
+    esp_timer_handle_t pending = NULL;
+    char *arg = NULL;
+    SemaphoreHandle_t mu = lua_delay_lock();
+    if (mu && xSemaphoreTake(mu, portMAX_DELAY) == pdTRUE) {
+        s_lua_delay_closed = true;
+        pending = s_delay_timer;
+        arg = s_delay_arg;
+        s_delay_timer = NULL;
+        s_delay_arg = NULL;
+        xSemaphoreGive(mu);
+    }
+    if (!pending) {
+        return;
+    }
+    if (esp_timer_stop(pending) == ESP_OK) {
+        free(arg);
+    }
+    esp_err_t del = esp_timer_delete(pending);
+    if (del != ESP_OK) {
+        ESP_LOGW(TAG, "lua delay timer delete failed: %d", del);
+    }
+}
+
+static void lua_delay_drop_queue(void)
+{
+    if (!lua_event_queue) {
+        return;
+    }
+    SemaphoreHandle_t mu = lua_delay_lock();
+    if (mu && xSemaphoreTake(mu, portMAX_DELAY) == pdTRUE) {
+        vQueueDelete(lua_event_queue);
+        lua_event_queue = NULL;
+        xSemaphoreGive(mu);
+    } else {
+        vQueueDelete(lua_event_queue);
+        lua_event_queue = NULL;
+    }
+}
+
+static void lua_delay_reopen(void)
+{
+    SemaphoreHandle_t mu = lua_delay_lock();
+    if (mu && xSemaphoreTake(mu, portMAX_DELAY) == pdTRUE) {
+        s_lua_delay_closed = false;
+        xSemaphoreGive(mu);
     }
 }
 
@@ -100,9 +193,34 @@ static int lua_delay(lua_State *L) {
         return luaL_error(L, "Failed to start delay timer");
     }
 
-    // Timer auto-deletes is NOT supported by default — store handle if you
-    // need to cancel, or just let it fire and leak the handle (acceptable for
-    // one-shot fire-and-forget on ESP32 for small counts)
+    esp_timer_handle_t previous = NULL;
+    char *previous_arg = NULL;
+    SemaphoreHandle_t mu = lua_delay_lock();
+    if (!mu || xSemaphoreTake(mu, pdMS_TO_TICKS(100)) != pdTRUE) {
+        esp_timer_stop(timer);
+        esp_timer_delete(timer);
+        free(name_copy);
+        return luaL_error(L, "Failed to track delay timer");
+    }
+    if (s_lua_delay_closed) {
+        xSemaphoreGive(mu);
+        esp_timer_stop(timer);
+        esp_timer_delete(timer);
+        free(name_copy);
+        return luaL_error(L, "delay rejected, lua is stopping");
+    }
+    previous = s_delay_timer;
+    previous_arg = s_delay_arg;
+    s_delay_timer = timer;
+    s_delay_arg = name_copy;
+    xSemaphoreGive(mu);
+
+    if (previous && esp_timer_stop(previous) == ESP_OK) {
+        free(previous_arg);
+        esp_timer_delete(previous);
+    } else if (previous) {
+        esp_timer_delete(previous);
+    }
     return 0;
 }
 
@@ -483,25 +601,31 @@ esp_err_t lua_init_persistent_minimal(const char *script_path, bool central,
     lua_vars_inject(vars_path);
     lua_uuids_inject(uuids_path);
 
+    // Open delay() before the script runs. Cleanup leaves the gate closed,
+    // and top-level code may call delay() during this pcall. The queue has
+    // to exist first so that callback has somewhere to post.
+    lua_delay_reopen();
+    lua_event_queue = xQueueCreate(LUA_QUEUE_SIZE, sizeof(lua_event_t));
+    if (!lua_event_queue) {
+        ESP_LOGE(TAG, "Failed to create Lua event queue");
+        lua_delay_cancel_pending();
+        lua_close(g_lua_state);
+        g_lua_state = NULL;
+        return ESP_FAIL;
+    }
+
     // Load and execute script
     if (luaL_loadfile(g_lua_state, script_path) != LUA_OK ||
         lua_pcall(g_lua_state, 0, 0, 0) != LUA_OK) {
         ESP_LOGE(TAG, "Lua init failed: %s", lua_tostring(g_lua_state, -1));
+        lua_delay_cancel_pending();
+        lua_delay_drop_queue();
         lua_close(g_lua_state);
         g_lua_state = NULL;
         return ESP_FAIL;
     }
     
     ESP_LOGI(TAG, "Lua script %s loaded", script_path);
-    
-    // Create event queue
-    lua_event_queue = xQueueCreate(LUA_QUEUE_SIZE, sizeof(lua_event_t));
-    if (!lua_event_queue) {
-        ESP_LOGE(TAG, "Failed to create Lua event queue");
-        lua_close(g_lua_state);
-        g_lua_state = NULL;
-        return ESP_FAIL;
-    }
 
     log_memory_usage("Before LUA task");
     
@@ -517,7 +641,8 @@ esp_err_t lua_init_persistent_minimal(const char *script_path, bool central,
     
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "Failed to create Lua task");
-        vQueueDelete(lua_event_queue);
+        lua_delay_cancel_pending();
+        lua_delay_drop_queue();
         lua_close(g_lua_state);
         g_lua_state = NULL;
         return ESP_FAIL;
@@ -700,10 +825,8 @@ void lua_cleanup(void) {
         }
     }
 
-    if (lua_event_queue) {
-        vQueueDelete(lua_event_queue);
-        lua_event_queue = NULL;
-    }
+    lua_delay_cancel_pending();
+    lua_delay_drop_queue();
 
     crypto_deinit();
 

@@ -294,14 +294,23 @@ esp_err_t stop_ble_simulation(void) {
     ESP_LOGI(TAG, "Stopping BLE simulation...");
     
     // First stop advertising all profiles
+    int stop_fail = 0;
     if (ble_server && ble_server->adv_set.instances) {
         for (uint8_t i = 0; i < ble_server->adv_set.count; i++) {
-            rc = ble_gap_ext_adv_stop(ble_server->adv_set.instances[i].instance);
-            if (rc != 0 && rc != BLE_HS_EALREADY)
-                WS_LOGW(TAG, "Failed to stop adv instance %d: %d", i, rc);
+            ble_adv_instance_t *inst = &ble_server->adv_set.instances[i];
+            rc = ble_gap_ext_adv_stop(inst->instance);
+            // Unconfigured sets return EINVAL. That is not a failed stop of a
+            // live advertiser, and it must not stick as the loop's final rc.
+            if (rc == 0 || rc == BLE_HS_EALREADY ||
+                (rc == BLE_HS_EINVAL && !inst->configured)) {
+                continue;
+            }
+            stop_fail = rc;
+            WS_LOGW(TAG, "Failed to stop adv instance %d: %d", i, rc);
         }
     }
     ble_sim_stop_all_ext_adv();
+    rc = stop_fail;
 
     if (rc == BLE_HS_EALREADY) {
         ESP_LOGI(TAG, "Advertising already stopped");
@@ -396,7 +405,7 @@ esp_err_t stop_ble_simulation(void) {
     free_ble_server(&ble_server);
 
     ble_sim_set_teardown(false);
-    
+
     ESP_LOGI(TAG, "BLE simulation stopped and memory cleared");
     
     return ESP_OK;
