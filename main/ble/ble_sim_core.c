@@ -67,10 +67,6 @@ void ble_sim_refresh_adv_address(const ble_adv_instance_t *inst)
         snprintf(label_text, sizeof(label_text), "%s", addr_text);
     }
 
-    // #region agent log
-    ESP_LOGI(TAG, "Adv address label -> %s", label_text);
-    // #endregion
-
     if (graphics_find_by_id("_adv_addr")) {
         gfx_update_text("_adv_addr", label_text, 0xFFFFFF);
     } else if (gfx_add_text_element("_adv_addr", label_text,

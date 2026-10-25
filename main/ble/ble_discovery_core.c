@@ -85,7 +85,6 @@ static void discovery_post_connect_continue(discovery_context_t *ctx)
 
     switch (s_disc_post_connect_action) {
     case DISC_POST_CONNECT_PAIRING_RETRY:
-        ctx->retrying_pairing_strategy = false;
         start_pairing_phase(ctx);
         break;
     case DISC_POST_CONNECT_READ_RETRY:
@@ -594,8 +593,8 @@ int ble_connect_and_discover(const char *addr_str, bool save_result, bool open_c
     }
     
     // Validate strategy
-    if (strategy >= PAIRING_STRATEGY_AUTO) {
-        ESP_LOGW(TAG, "Invalid strategy %d, using AUTO", strategy);
+    if (strategy > PAIRING_STRATEGY_AUTO) {
+        ESP_LOGW(TAG, "Invalid strategy %d, using Legacy Just Works", strategy);
         strategy = PAIRING_STRATEGY_LEGACY_JUST_WORKS;
     }
     

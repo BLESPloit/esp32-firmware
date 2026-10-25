@@ -299,8 +299,8 @@ void start_pairing_phase(discovery_context_t *ctx)
             ctx->pairing_strategy = PAIRING_STRATEGY_LEGACY_JUST_WORKS;
             ESP_LOGI(TAG, "AUTO mode: Starting with strategy 1/4");
         } else {
-            // Resuming after disconnect
             ctx->pairing_strategy = g_pairing_attempt.current_strategy;
+            ctx->retrying_pairing_strategy = false;
             ESP_LOGI(TAG, "AUTO mode: Resuming with strategy %d/4", 
                      ctx->pairing_strategy + 1);
         }
