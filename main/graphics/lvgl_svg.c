@@ -253,6 +253,10 @@ lv_obj_t *disp_render_svg(const char *filepath, const char *id,
                            int x, int y, int32_t target_w, int32_t target_h,
                            bool color_provided, uint32_t color)
 {
+    // Lua calls this from lua_task. The LVGL task may be inside lv_timer_handler.
+    // The mutex is recursive, so the debounce timer callback can call this too.
+    if (!lvgl_lock(-1)) return NULL;
+
     lv_obj_t *obj = lv_image_create(lv_screen_active());
     lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_event_cb(obj, svg_img_delete_cb, LV_EVENT_DELETE, NULL);
@@ -262,12 +266,19 @@ lv_obj_t *disp_render_svg(const char *filepath, const char *id,
         // Pre-load failed at init — this is a hard error
         ESP_LOGE(TAG, "SVG %s not pre-loaded, cannot render", id);
         lv_obj_del(obj);
+        lvgl_unlock();
         return NULL;
     }
 
     svg_buf_render_req_t *req = malloc(sizeof(svg_buf_render_req_t));
-    assert(req);
+    if (!req) {
+        ESP_LOGE(TAG, "SVG %s render request alloc failed", id);
+        lv_obj_del(obj);
+        lvgl_unlock();
+        return NULL;
+    }
     strncpy(req->id, id, sizeof(req->id) - 1);
+    req->id[sizeof(req->id) - 1] = '\0';
     req->raw            = e->svg_buf;
     req->raw_len        = e->svg_len;
     req->x              = x;  req->y = y;
@@ -278,5 +289,6 @@ lv_obj_t *disp_render_svg(const char *filepath, const char *id,
     lv_timer_t *t = lv_timer_create(svg_render_from_buf_timer_cb, 0, req);
     lv_timer_set_repeat_count(t, 1);
 
+    lvgl_unlock();
     return obj;
 }

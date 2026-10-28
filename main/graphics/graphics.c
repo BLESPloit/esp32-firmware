@@ -544,6 +544,8 @@ void gfx_set_element_color(const char *id, uint32_t color)
         websocket_set_element_color(id, color);
         return;
 #else
+        // lua_task arms this timer. lv_timer_handler runs on the LVGL task.
+        if (!lvgl_lock(-1)) return;
         if (e->pending_render_timer) {
             // Reset the countdown — a newer color arrived
             lv_timer_reset(e->pending_render_timer);
@@ -553,6 +555,7 @@ void gfx_set_element_color(const char *id, uint32_t color)
                 svg_color_apply_timer_cb, COLOR_DEBOUNCE_MS, e);
             lv_timer_set_repeat_count(e->pending_render_timer, 1);
         }
+        lvgl_unlock();
         return;   // actual render deferred
 #endif
 

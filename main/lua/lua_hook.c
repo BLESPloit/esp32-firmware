@@ -483,6 +483,12 @@ static int lua_vars_save(lua_State *L) {
     }
 
     cJSON *root = cJSON_CreateObject();
+    if (!root) {
+        ESP_LOGE(TAG, "vars_save: out of memory");
+        lua_pushboolean(L, 0);
+        return 1;
+    }
+
     lua_pushnil(L);
     while (lua_next(L, -2)) {
         const char *key = lua_tostring(L, -2);
@@ -494,9 +500,17 @@ static int lua_vars_save(lua_State *L) {
 
     char *json_str = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
+    if (!json_str) {
+        ESP_LOGE(TAG, "vars_save: out of memory");
+        lua_pushboolean(L, 0);
+        return 1;
+    }
 
     FILE *f = fopen(g_vars_path, "w");
-    if (f) { fputs(json_str, f); fclose(f); }
+    if (f) {
+        fputs(json_str, f);
+        fclose(f);
+    }
     cJSON_free(json_str);
 
     lua_pushboolean(L, f != NULL);
