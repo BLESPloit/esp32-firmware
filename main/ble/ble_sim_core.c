@@ -11,6 +11,7 @@
 #include "services/gap/ble_svc_gap.h"
 #include "ble/ble_discovery.h"
 #include "ble/ble_scan.h"
+#include "ble/ble_observe.h"
 #include "ble/device_parser.h"
 #include "graphics/graphics.h"
 #include "interface/interface_sim.h"
@@ -247,6 +248,8 @@ esp_err_t load_ble_device_for_simulation(const char *device_id) {
 
     // Initialize Lua, graphics, and interface
 
+    ble_observe_begin_peripheral(paths->peripheral);
+
     bool lua_available = false;
     if (paths->peripheral->entry != NULL) {
         FILE *f = fopen(paths->peripheral->entry, "r");
@@ -271,6 +274,7 @@ esp_err_t load_ble_device_for_simulation(const char *device_id) {
     // Only enforce Lua task if we actually tried to start it
     if (lua_available && !lua_is_task_running()) {
         WS_LOGE(TAG, "Lua task failed to start — aborting simulation");
+        ble_observe_end();
         graphics_cleanup();
         interface_cleanup();
         return ESP_FAIL;
@@ -288,11 +292,18 @@ esp_err_t load_ble_device_for_simulation(const char *device_id) {
     esp_err_t ret = start_ble_simulation();
     if (ret != ESP_OK) {
         WS_LOGE(TAG, "BLE simulation failed to start: %d", ret);
+        ble_observe_end();
         lua_cleanup();
         graphics_cleanup();
         interface_cleanup();
         free_ble_server(&ble_server);
         return ESP_FAIL;
+    }
+
+    if (ble_observe_autostart_pending()) {
+        if (ble_observe_scan_enable() != ESP_OK) {
+            ESP_LOGW(TAG, "Observe scan did not start");
+        }
     }
 
     // show advertising address for the first profile; later adv_enable calls refresh it
@@ -390,11 +401,8 @@ esp_err_t stop_ble_simulation(void) {
 
     ble_sim_clear_ext_adv_sets();
     
-    if (ble_gap_disc_active()) {
-        ESP_LOGI(TAG, "Discovery active, cancelling...");
-        ble_gap_disc_cancel();
-        vTaskDelay(pdMS_TO_TICKS(200));
-    }
+    // Drop only this sim's scan. A Remote Scan the user still has open keeps running.
+    ble_scan_unsubscribe(BLE_SCAN_CONSUMER_SIM);
        
     // Reset GATT database
     rc = ble_gatts_reset();
@@ -453,6 +461,8 @@ void unload_ble_device_for_simulation(void) {
     // Clear vars path before Lua teardown — prevents stale path if a new
     // device loads without vars.json before g_vars_path is re-set.
     lua_vars_set_path("");
+
+    ble_observe_end();
 
     // Cleanup Lua state
     lua_cleanup();

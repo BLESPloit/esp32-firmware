@@ -132,6 +132,7 @@ BLE GATT client (blocking, ~3s timeout on read/write):
 | `ble_unsubscribe(svc_uuid, chr_uuid)` → ok | Best-effort disable notify. |
 | `get_mtu()` → int | Negotiated ATT MTU for the active central or sim link (default 23 if unknown); usable notify/write payload roughly `get_mtu() - 3`. Central auto-exchanges MTU on connect before `on_connected`. |
 | `set_preferred_mtu(mtu)` → ok [, err] | Set preferred ATT MTU (range **23 .. 517**); triggers Exchange MTU on an active central connection when possible. |
+| `scan_set_filter([rules])` → ok [, err] | Choose which legacy advertisement to connect to. No call keeps the `ble.json` address and address type. A table replaces that check until `scan_set_filter()` with no arguments restores it. A match connects to the address on that report and stops discovery. The central does not receive `on_adv`. `interval_ms` is ignored. See the peripheral section for the table fields. |
 
 Define these Lua functions in your script to receive callbacks:
 
@@ -182,13 +183,51 @@ BLE peripheral (advertising profile **`id`** values come from **`peripheral/adv.
 |----------|-------------|
 | `ble_notify(svc_uuid, chr_uuid, hex_str)` → ok [, err] | Decode `hex_str`, update characteristic backing value, notify subscribers. |
 | `ble_notify_raw(svc_uuid, chr_uuid, hex_str)` → ok [, err] | Send notify PDU without updating backing store; connectivity required. Does not honor CCCD (may transmit unsafely — see source comments). |
-| `adv_set_data(profile_id, adv_hex [, scan_rsp_hex])` → bool | Replace raw adv (+ optional scan response) hex for advertising profile id. |
+| `adv_set_data(profile_id, adv_hex [, scan_rsp_hex])` → ok [, err] | Replace raw adv (+ optional scan response) hex for advertising profile id. On iOS Local Sim, a dropped AD type returns `false` and the reason. |
+| `platform()` → string | `"esp32"` in this firmware. Local Sim returns `"android"` or `"ios"`. |
 | `get_adv_bd_addr(profile_id)` → addr \| nil [, err] | Resolved TX address string when available. |
 | `adv_enable(profile_id)` → ok [, err] | Start advertising instance. |
 | `adv_disable(profile_id)` → ok [, err] | Stop instance. |
 | `ble_connected()` → bool | Active sim connection present. |
 | `ble_disconnect()` → ok [, err] | Terminate the connected central (`BLE_ERR_REM_USER_CONN_TERM`). Handle clears on disconnect event. |
 | `get_mtu()` / `set_preferred_mtu(mtu)` | Same semantics as central; `get_mtu()` reads the sim connection handle. |
+| `scan_enable()` → ok [, err] | Subscribe this simulation to the shared scanner. |
+| `scan_disable()` → ok [, err] | Unsubscribe. A Remote Scan that is still open keeps running. |
+| `scan_set_filter([rules])` → ok [, err] | Replace the advertisement filter. No arguments restores the manifest seed. A bad table leaves the previous filter in place. |
+
+Receiving advertisements is legacy-only on ESP32 (31-byte advertising data and scan response). Android and iOS Local Sim also call `on_adv`. iOS rebuilds the payload from the fields it is given, passes a stand-in address rather than the Bluetooth address, and does not separate a scan response. Opt in from `manifest.json`:
+
+```json
+"peripheral": {
+  "observe": { "scan_conditions": { "company_id": "004C" } }
+}
+```
+
+`"observe": true` matches every legacy PDU. Absent or false does not subscribe. Seed keys are AND-ed: `company_id` (hex string or number; `"0000"` is a real id; an array is OR, up to 4), `manufacturer_data_prefix_hex` (bytes after the company id), `service_data_uuid_16`, `device_name_contains`. Extended advertisements and this device's own addresses are dropped before the filter.
+
+`scan_set_filter` replaces that seed. The table fields, all optional and AND-ed:
+
+| Field | Meaning |
+|-------|---------|
+| `addr` | Exact `AA:BB:CC:DD:EE:FF`. Omit to accept any address. |
+| `rssi_min` | Drop weaker reports. |
+| `scan_rsp` | `true` or `false` to take one PDU kind. Omit for both. |
+| `bytes` | List of `{ offset, hex, mask? }` against the raw PDU (length byte first, same bytes as `payload_hex`). `hex` and `mask` are the same length. At most 4 rules, 16 bytes each. |
+| `interval_ms` | Capped repeat for an unchanged payload. Default `0` (a new body only). Clamped to 60000. |
+
+```lua
+function on_adv(addr, addr_type, rssi, payload_hex, is_scan_rsp, seen)
+end
+
+function on_scan_stopped()
+end
+```
+
+`payload_hex` is lowercase. `is_scan_rsp` is true for the scan-response PDU, which arrives separately. `seen` is how many matching PDUs were folded into this call, at least 1. The first matching payload is delivered immediately. The same bytes increment `seen` and are not queued again, unless `interval_ms` has elapsed since the last delivery. A changed payload is delivered immediately with `seen` reset to 1. The handler must be safe to run again on the same body when `interval_ms` is not 0.
+
+Silence is not an event. A script that must stop when advertisements cease bumps a generation in `on_adv` and schedules `delay`. The timer callback acts only when that generation is still current, and the period has to be longer than `interval_ms`.
+
+`on_scan_stopped` runs when Remote Scan is stopped or a central connect cancels discovery. The script does not resubscribe by itself; call `scan_enable()` to listen again. Stopping the simulation while Remote Scan is open leaves that scan running.
 
 Optional Lua globals (called asynchronously when a central connects or disconnects):
 

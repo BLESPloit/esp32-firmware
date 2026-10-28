@@ -19,6 +19,7 @@
 #include "common/utils.h"
 #include "lua/lua_hook.h"            // lua_call_handler_async()
 #include "lua/lua_ble_bridge.h"
+#include "ble/ble_observe.h"
 
 #define TAG "LUA BLE"
 
@@ -692,12 +693,166 @@ static int lua_ble_connected(lua_State *L) {
     return 1;
 }
 
+static int scan_fail(lua_State *L, const char *msg) {
+    lua_pushboolean(L, 0);
+    lua_pushstring(L, msg);
+    return 2;
+}
+
+static bool parse_filter_addr(const char *s, uint8_t val[6]) {
+    unsigned b[6];
+    if (!s || sscanf(s, "%02x:%02x:%02x:%02x:%02x:%02x",
+                     &b[5], &b[4], &b[3], &b[2], &b[1], &b[0]) != 6) {
+        return false;
+    }
+    for (int i = 0; i < 6; i++) val[i] = (uint8_t)b[i];
+    return true;
+}
+
+static int lua_scan_enable(lua_State *L) {
+    esp_err_t err = ble_observe_scan_enable();
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) return scan_fail(L, "scan_enable failed");
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+static int lua_scan_disable(lua_State *L) {
+    if (ble_observe_scan_disable() != ESP_OK) return scan_fail(L, "scan_disable failed");
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+// scan_set_filter() restores the manifest or ble.json seed.
+// scan_set_filter({ addr=, rssi_min=, scan_rsp=, interval_ms=, bytes={{offset,hex,mask?}} })
+// replaces it. A bad table leaves the previous filter in place.
+static int lua_scan_set_filter(lua_State *L) {
+    if (lua_gettop(L) == 0 || lua_isnil(L, 1)) {
+        ble_observe_clear_lua_filter();
+        lua_pushboolean(L, 1);
+        return 1;
+    }
+    if (!lua_istable(L, 1)) return scan_fail(L, "scan_set_filter: expected a table");
+
+    ble_observe_lua_filter_t f;
+    memset(&f, 0, sizeof(f));
+
+    lua_getfield(L, 1, "addr");
+    if (!lua_isnil(L, -1)) {
+        if (!lua_isstring(L, -1) || !parse_filter_addr(lua_tostring(L, -1), f.addr)) {
+            lua_pop(L, 1);
+            return scan_fail(L, "scan_set_filter: bad addr");
+        }
+        f.has_addr = true;
+    }
+    lua_pop(L, 1);
+
+    lua_getfield(L, 1, "rssi_min");
+    if (!lua_isnil(L, -1)) {
+        if (!lua_isnumber(L, -1)) {
+            lua_pop(L, 1);
+            return scan_fail(L, "scan_set_filter: bad rssi_min");
+        }
+        int v = (int)lua_tointeger(L, -1);
+        if (v < -128 || v > 20) {
+            lua_pop(L, 1);
+            return scan_fail(L, "scan_set_filter: rssi_min out of range");
+        }
+        f.has_rssi_min = true;
+        f.rssi_min = (int8_t)v;
+    }
+    lua_pop(L, 1);
+
+    lua_getfield(L, 1, "scan_rsp");
+    if (!lua_isnil(L, -1)) {
+        if (!lua_isboolean(L, -1)) {
+            lua_pop(L, 1);
+            return scan_fail(L, "scan_set_filter: scan_rsp must be true or false");
+        }
+        f.has_scan_rsp = true;
+        f.scan_rsp = lua_toboolean(L, -1) ? true : false;
+    }
+    lua_pop(L, 1);
+
+    lua_getfield(L, 1, "interval_ms");
+    if (!lua_isnil(L, -1)) {
+        if (!lua_isnumber(L, -1)) {
+            lua_pop(L, 1);
+            return scan_fail(L, "scan_set_filter: bad interval_ms");
+        }
+        lua_Integer v = lua_tointeger(L, -1);
+        if (v < 0) v = 0;
+        if (v > 60000) v = 60000;
+        f.interval_ms = (uint32_t)v;
+    }
+    lua_pop(L, 1);
+
+    lua_getfield(L, 1, "bytes");
+    if (!lua_isnil(L, -1)) {
+        if (!lua_istable(L, -1)) {
+            lua_pop(L, 1);
+            return scan_fail(L, "scan_set_filter: bytes must be a list");
+        }
+        int n = (int)lua_rawlen(L, -1);
+        if (n > BLE_OBSERVE_BYTE_RULES) {
+            lua_pop(L, 1);
+            return scan_fail(L, "scan_set_filter: at most 4 byte rules");
+        }
+        for (int i = 1; i <= n; i++) {
+            lua_rawgeti(L, -1, i);
+            if (!lua_istable(L, -1)) {
+                lua_pop(L, 2);
+                return scan_fail(L, "scan_set_filter: byte rule must be a table");
+            }
+            lua_getfield(L, -1, "offset");
+            lua_getfield(L, -2, "hex");
+            lua_getfield(L, -3, "mask");
+            if (!lua_isnumber(L, -3) || !lua_isstring(L, -2)) {
+                lua_pop(L, 4);
+                return scan_fail(L, "scan_set_filter: byte rule needs offset and hex");
+            }
+            int offset = (int)lua_tointeger(L, -3);
+            const char *hex = lua_tostring(L, -2);
+            uint8_t raw[BLE_OBSERVE_RULE_LEN];
+            int len = hex_string_to_bytes(hex, raw, BLE_OBSERVE_RULE_LEN);
+            if (len <= 0 || offset < 0 || offset + len > 31) {
+                lua_pop(L, 4);
+                return scan_fail(L, "scan_set_filter: byte rule out of range");
+            }
+            f.rules[f.nrules].offset = (uint8_t)offset;
+            f.rules[f.nrules].len = (uint8_t)len;
+            memcpy(f.rules[f.nrules].hex, raw, (size_t)len);
+            memset(f.rules[f.nrules].mask, 0xFF, (size_t)len);
+            if (!lua_isnil(L, -1)) {
+                if (!lua_isstring(L, -1)) {
+                    lua_pop(L, 4);
+                    return scan_fail(L, "scan_set_filter: mask must be hex");
+                }
+                uint8_t mask[BLE_OBSERVE_RULE_LEN];
+                int mlen = hex_string_to_bytes(lua_tostring(L, -1), mask, BLE_OBSERVE_RULE_LEN);
+                if (mlen != len) {
+                    lua_pop(L, 4);
+                    return scan_fail(L, "scan_set_filter: mask length must match hex");
+                }
+                memcpy(f.rules[f.nrules].mask, mask, (size_t)len);
+            }
+            f.nrules++;
+            lua_pop(L, 4);
+        }
+    }
+    lua_pop(L, 1);
+
+    if (!ble_observe_set_lua_filter(&f)) return scan_fail(L, "scan_set_filter: busy");
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
 void lua_ble_central_register_functions(lua_State *L) {
     lua_register(L, "ble_write",       lua_ble_write);
     lua_register(L, "ble_read",        lua_ble_read);
     lua_register(L, "ble_subscribe",   lua_ble_subscribe);
     lua_register(L, "ble_unsubscribe", lua_ble_unsubscribe);
     lua_register(L, "ble_connected",   lua_ble_connected);
+    lua_register(L, "scan_set_filter", lua_scan_set_filter);
 
     // TBD: on_notify
     // optionally: start_notify_wait / finish_notify_wait (available on mobile)
@@ -949,6 +1104,11 @@ static int lua_ble_disconnect(lua_State *L) {
     return 1;
 }
 
+static int lua_platform(lua_State *L) {
+    lua_pushstring(L, "esp32");
+    return 1;
+}
+
 void lua_ble_peripheral_register_functions(lua_State *L) {
     lua_register(L, "ble_notify", lua_ble_notify);
     lua_register(L, "ble_notify_raw", lua_ble_notify_raw);
@@ -956,6 +1116,11 @@ void lua_ble_peripheral_register_functions(lua_State *L) {
     lua_register(L, "get_adv_bd_addr", lua_get_adv_bd_addr);
     lua_register(L, "adv_enable",   lua_adv_enable);
     lua_register(L, "adv_disable",  lua_adv_disable);
+
+    lua_register(L, "scan_enable",         lua_scan_enable);
+    lua_register(L, "scan_disable",        lua_scan_disable);
+    lua_register(L, "scan_set_filter",     lua_scan_set_filter);
+    lua_register(L, "platform",            lua_platform);
 
     lua_register(L, "ble_connected",       lua_ble_sim_connected);
     lua_register(L, "ble_disconnect",      lua_ble_disconnect);

@@ -319,13 +319,7 @@ static int disconnect_and_prepare_gap(void)
         vTaskDelay(pdMS_TO_TICKS(200));
     }
 
-    rc = ble_gap_disc_cancel();
-    if (rc != 0 && rc != BLE_HS_EALREADY && rc != BLE_HS_EDONE) {
-        ESP_LOGW(TAG, "Failed to cancel scan: rc=%d", rc);
-    } else if (rc != 0) {
-        ESP_LOGD(TAG, "Scan cancel returned rc=%d (not scanning, ok)", rc);
-    }
-    set_ble_scanning(false);
+    ble_scan_force_stop();
     vTaskDelay(pdMS_TO_TICKS(150));
     return 0;
 }

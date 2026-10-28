@@ -24,6 +24,7 @@
 #include "lua/lua_bits_hex.h"
 #include "lua/lua_mac.h"
 #include "lua/lua_hook.h"
+#include "ble/ble_observe.h"
 
 #define TAG "LUA"
 
@@ -384,6 +385,24 @@ static void lua_task(void* arg) {
                     break;
                 }
 
+                case LUA_EVENT_ON_ADV: {
+                    if (event.data_len > 0 && event.data[0] == 1) {
+                        lua_getglobal(g_lua_state, "on_scan_stopped");
+                        if (lua_isfunction(g_lua_state, -1)) {
+                            if (lua_pcall(g_lua_state, 0, 0, 0) != LUA_OK) {
+                                ESP_LOGE(TAG, "on_scan_stopped error: %s",
+                                         lua_tostring(g_lua_state, -1));
+                                lua_pop(g_lua_state, 1);
+                            }
+                        } else {
+                            lua_pop(g_lua_state, 1);
+                        }
+                    } else {
+                        ble_observe_deliver(g_lua_state);
+                    }
+                    break;
+                }
+
                 case LUA_EVENT_SHUTDOWN: {
                     ESP_LOGI(TAG, "Lua shutdown requested");
                     if (g_lua_state) {
@@ -656,6 +675,16 @@ esp_err_t lua_init_persistent_minimal(const char *script_path, bool central,
 }
 
 // ── Public API - Asynchronous ────────────────────────────────────────────────── 
+
+esp_err_t lua_post_observe(uint8_t kind) {
+    if (!lua_event_queue) return ESP_FAIL;
+    lua_event_t event = {0};
+    event.type = LUA_EVENT_ON_ADV;
+    event.data[0] = kind;
+    event.data_len = 1;
+    if (xQueueSend(lua_event_queue, &event, 0) != pdTRUE) return ESP_FAIL;
+    return ESP_OK;
+}
 
 esp_err_t lua_call_handler_async(const char *func_name, const char *param) {
     if (!lua_event_queue) {

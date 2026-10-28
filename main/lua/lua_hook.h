@@ -14,6 +14,7 @@ typedef enum {
     LUA_EVENT_CALL_FUNCTION,     // Call function with binary data
     LUA_EVENT_DELAYED_CALL,      // Call function after a predefined delay
     LUA_EVENT_SHUTDOWN,          // Close lua_State and exit lua_task
+    LUA_EVENT_ON_ADV,            // Deliver queued scan reports, or on_scan_stopped
 } lua_event_type_t;
 
 // Event structure
@@ -41,6 +42,9 @@ esp_err_t lua_init_persistent_minimal(const char *script_path, bool central,
 
 // Asynchronous call (non-blocking, for handlers like on_startup, on_action)
 esp_err_t lua_call_handler_async(const char *func_name, const char *param);
+
+// kind 0 = drain on_adv slots. kind 1 = call on_scan_stopped. Zero queue timeout.
+esp_err_t lua_post_observe(uint8_t kind);
 
 // Synchronous call (blocking, for functions with return values)
 esp_err_t lua_call_stateful(const char *func_name, 

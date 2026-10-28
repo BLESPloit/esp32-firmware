@@ -11,6 +11,77 @@ static const char *TAG = "device manifest";
 
 // ─── Internal helpers ────────────────────────────────────────────────────────
 
+static bool hex_nibble(char c, uint8_t *out) {
+    if (c >= '0' && c <= '9') { *out = (uint8_t)(c - '0'); return true; }
+    if (c >= 'a' && c <= 'f') { *out = (uint8_t)(c - 'a' + 10); return true; }
+    if (c >= 'A' && c <= 'F') { *out = (uint8_t)(c - 'A' + 10); return true; }
+    return false;
+}
+
+// Company id strings are hex ("004C", "0x004c"). JSON numbers are the integer id.
+// "0000" is a real company id, not "unset".
+static bool parse_company_id_item(cJSON *item, uint16_t *out) {
+    if (cJSON_IsNumber(item)) {
+        *out = (uint16_t)item->valueint;
+        return true;
+    }
+    if (!cJSON_IsString(item) || !item->valuestring || !item->valuestring[0]) return false;
+    const char *s = item->valuestring;
+    if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) s += 2;
+    uint32_t v = 0;
+    int digits = 0;
+    for (const char *p = s; *p; p++) {
+        uint8_t n;
+        if (!hex_nibble(*p, &n)) return false;
+        v = (v << 4) | n;
+        digits++;
+        if (digits > 4) return false;
+    }
+    if (digits == 0) return false;
+    *out = (uint16_t)v;
+    return true;
+}
+
+static void copy_json_str(char *dst, size_t dst_len, cJSON *item) {
+    dst[0] = '\0';
+    if (!cJSON_IsString(item) || !item->valuestring) return;
+    snprintf(dst, dst_len, "%s", item->valuestring);
+}
+
+static void parse_observe(device_role_peripheral_t *role, cJSON *periph) {
+    cJSON *obs = cJSON_GetObjectItem(periph, "observe");
+    cJSON *conds = NULL;
+    if (cJSON_IsTrue(obs)) {
+        role->observe = true;
+    } else if (cJSON_IsObject(obs)) {
+        role->observe = true;
+        conds = cJSON_GetObjectItem(obs, "scan_conditions");
+    }
+    if (!cJSON_IsObject(conds)) return;
+
+    cJSON *cid = cJSON_GetObjectItem(conds, "company_id");
+    if (cJSON_IsArray(cid)) {
+        int n = cJSON_GetArraySize(cid);
+        for (int i = 0; i < n && role->observe_company_count < PERIPH_OBSERVE_COMPANIES; i++) {
+            uint16_t id;
+            if (parse_company_id_item(cJSON_GetArrayItem(cid, i), &id)) {
+                role->observe_company_id[role->observe_company_count++] = id;
+            }
+        }
+    } else {
+        uint16_t id;
+        if (parse_company_id_item(cid, &id)) {
+            role->observe_company_id[role->observe_company_count++] = id;
+        }
+    }
+    copy_json_str(role->observe_mfg_prefix, sizeof(role->observe_mfg_prefix),
+                  cJSON_GetObjectItem(conds, "manufacturer_data_prefix_hex"));
+    copy_json_str(role->observe_svc16, sizeof(role->observe_svc16),
+                  cJSON_GetObjectItem(conds, "service_data_uuid_16"));
+    copy_json_str(role->observe_name, sizeof(role->observe_name),
+                  cJSON_GetObjectItem(conds, "device_name_contains"));
+}
+
 static char *dup_str(cJSON *item) {
     if (!cJSON_IsString(item) || !item->valuestring || item->valuestring[0] == '\0')
         return NULL;
@@ -132,6 +203,7 @@ device_paths_t *manifest_resolve(const char *device_id) {
                 p->peripheral->interface = join_path(base, dup_str(cJSON_GetObjectItem(periph, "interface")));
                 cJSON *show_addr = cJSON_GetObjectItem(periph, "show_adv_address");
                 p->peripheral->show_adv_address = cJSON_IsTrue(show_addr);
+                parse_observe(p->peripheral, periph);
             }
         }
 

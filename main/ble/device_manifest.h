@@ -1,5 +1,6 @@
 #pragma once
 #include <stdbool.h>
+#include <stdint.h>
 #include "esp_err.h"
 #include "cJSON.h"
 
@@ -7,11 +8,24 @@
 // Each is heap-allocated only if that role exists in the manifest.
 // Caller frees with the matching _free() + free().
 
+#define PERIPH_OBSERVE_ID_LEN 8
+#define PERIPH_OBSERVE_MFG_LEN 40
+#define PERIPH_OBSERVE_NAME_LEN 32
+#define PERIPH_OBSERVE_COMPANIES 4
+
 typedef struct {
     char *advertisement; // advertisement definitions, by default adv.json
     char *entry;      // roles.peripheral.entry  (Lua)
     char *interface;  // roles.peripheral.interface
-    bool show_adv_address; 
+    bool show_adv_address;
+    // roles.peripheral.observe. Absent/false leaves observe false.
+    // "observe": true matches every legacy PDU. An object may seed the filter.
+    bool observe;
+    uint8_t observe_company_count;
+    uint16_t observe_company_id[PERIPH_OBSERVE_COMPANIES];
+    char observe_mfg_prefix[PERIPH_OBSERVE_MFG_LEN];
+    char observe_svc16[PERIPH_OBSERVE_ID_LEN];
+    char observe_name[PERIPH_OBSERVE_NAME_LEN];
 } device_role_peripheral_t;
 
 typedef struct {

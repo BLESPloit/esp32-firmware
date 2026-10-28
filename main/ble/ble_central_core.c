@@ -14,6 +14,7 @@
 #include "services/gap/ble_svc_gap.h"
 #include "ble/ble_discovery.h" 
 #include "ble/ble_scan.h"
+#include "ble/ble_observe.h"
 #include "device_parser.h"
 #include "graphics/graphics.h"
 #include "interface/interface_central.h"
@@ -37,6 +38,20 @@ static TimerHandle_t s_central_post_connect_timer = NULL;
 static char s_last_relay_svc[BLE_UUID_STR_LEN];
 static char s_last_relay_chr[BLE_UUID_STR_LEN];
 static bool s_broadcast_discovery_on_ready = false;
+static bool s_connect_busy = false;
+
+static void central_on_shared_disc(const uint8_t *addr, uint8_t addr_type, int8_t rssi,
+                                   const uint8_t *data, uint8_t data_len, bool is_scan_rsp) {
+    if (s_connect_busy || !addr) return;
+    if (!ble_observe_central_match(addr, addr_type, rssi, data, data_len, is_scan_rsp)) return;
+    s_connect_busy = true;
+    ble_addr_t peer;
+    memset(&peer, 0, sizeof(peer));
+    memcpy(peer.val, addr, 6);
+    peer.type = addr_type;
+    ESP_LOGI(TAG, "Matching device found, trying to connect");
+    ble_central_connect(&peer);
+}
 
 static int ble_central_gap_event_handler(struct ble_gap_event *event, void *arg);
 static relay_send_fn_t g_relay_send = websocket_broadcast_json_transient;
@@ -511,39 +526,16 @@ void ble_central_set_pending_requester(const char *node_id) {
 // TBD: maybe reuse the BLE discovery?
 esp_err_t ble_central_start_scanning(void)
 {
-    struct ble_gap_disc_params disc_params;
-
-    memset(&disc_params, 0, sizeof(disc_params));
-    disc_params.filter_duplicates = 1; // get each advertisement only once
-    disc_params.passive = 0; // we want also the scan responses
-    // leave default for the rest parameters
-    disc_params.itvl = 0; 
-    disc_params.window = 0;
-    disc_params.filter_policy = 0;
-    disc_params.limited = 0;
-
     ESP_LOGI(TAG, "Start scanning...");
-
-    uint8_t own_addr_type;
-    int rc = ble_central_infer_own_addr_type(&own_addr_type);
-    if (rc != 0) {
-        ESP_LOGE(TAG, "Failed to infer own addr type: %d", rc);
-        return ESP_FAIL;
+    s_connect_busy = false;
+    ble_scan_set_central_fn(central_on_shared_disc);
+    esp_err_t err = ble_scan_subscribe(BLE_SCAN_CONSUMER_CENTRAL);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGE(TAG, "Failed to subscribe central scan");
+        return err;
     }
-
-    rc = ble_gap_disc(own_addr_type, BLE_HS_FOREVER,
-                      &disc_params, ble_central_gap_event_handler, NULL);
-    if (rc != 0) {
-        ESP_LOGE(TAG, "Failed to start scan: %d", rc);
-        return ESP_FAIL;
-    }
-
     send_update_central_status_to_ws("scanning");
-
-    set_ble_scanning(true);
-
     return ESP_OK;
-
 }
 
 
@@ -640,6 +632,7 @@ esp_err_t ble_central_load_services_and_connect(const char *device_id) {
     cached_device_id[sizeof(cached_device_id) - 1] = '\0';
 
     ESP_LOGI(TAG, "Successfully parsed BLE services for connection");
+    ble_observe_begin_central(&central_ctx->device_addr);
     lua_init_persistent_minimal(paths->central->entry, true, paths->vars, paths->uuids);
     interface_central_init(paths->central->menu);
     ble_central_start_scanning();
@@ -662,16 +655,14 @@ void unload_ble_device_for_central(bool keep_services) {
     ble_central_smp_reset();
     central_cancel_post_connect();
 
-    // Cancel ongoing operations (pending connect + scan)
+    // Cancel ongoing operations (pending connect + this central's scan)
     if (ble_gap_conn_active()) {
         ble_gap_conn_cancel();
         vTaskDelay(pdMS_TO_TICKS(100));
     }
 
-    int rc = ble_gap_disc_cancel();
-    if (rc != 0 && rc != BLE_HS_EALREADY) {
-        ESP_LOGW(TAG, "Failed to cancel scan: %d", rc);
-    }
+    ble_scan_unsubscribe(BLE_SCAN_CONSUMER_CENTRAL);
+    int rc = 0;
 
     // terminate established connection
     if (central_conn_handle != BLE_HS_CONN_HANDLE_NONE) {  
@@ -702,6 +693,7 @@ void unload_ble_device_for_central(bool keep_services) {
     }
 
     central_teardown_runtime();
+    ble_observe_end();
     central_free_ctx();
     interface_central_state_clear_all();
 
@@ -718,13 +710,9 @@ int ble_central_connect(ble_addr_t *addr)
     struct ble_gap_conn_params conn_params = {0};
     uint8_t own_addr_type;
 
-    // Stop scan
-    rc = ble_gap_disc_cancel();
-    if (rc != 0 && rc != BLE_HS_EALREADY) {
-        ESP_LOGW(TAG, "Failed to cancel scan: %d", rc);
-    }
-    set_ble_scanning(false);
-    
+    // Stop every shared-scan consumer. Discovery cannot start while a scan is active.
+    ble_scan_force_stop();
+
     vTaskDelay(pdMS_TO_TICKS(100));    
 
     // Cancel ongoing operations
@@ -1243,18 +1231,8 @@ static int ble_central_gap_event_handler(struct ble_gap_event *event, void *arg)
    
     switch (event->type) {
 
-    // scanner
-    case BLE_GAP_EVENT_EXT_DISC:
-//        ESP_LOGI(TAG, "Extended disc: addr type=%d rssi=%d", event->ext_disc.addr.type, event->ext_disc.rssi);
-        if (ble_central_is_adv_matching(&event->ext_disc)) {
-            WS_LOGI(TAG, "Matching device found, trying to connect");
-            ble_central_connect(&event->ext_disc.addr);
-        }
-        break;
-        
+    // Scan reports arrive through the shared scanner, not this connection callback.
     case BLE_GAP_EVENT_DISC_COMPLETE:
-        ESP_LOGI(TAG, "Scan complete");
-        set_ble_scanning(false);
         break;
                 
 

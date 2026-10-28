@@ -20,6 +20,7 @@
 #include "common/utils.h"
 #include "api/web_server.h" // web_scan_push_device, web_scan_broadcast_status
 #include "ble/ble_scan.h"
+#include "ble/ble_observe.h"
 #include "ble/ble_discovery.h"
 
 
@@ -33,6 +34,12 @@ int scanned_device_count = 0;
 
 static bool ble_scanning = false;
 static SemaphoreHandle_t scanning_status_mutex = NULL; // for thread-safe update of scanning status
+
+static uint8_t s_consumers = 0;
+static bool s_forever = false;
+static int s_ignore_completes = 0;
+static bool s_notify_sim_on_stop = false;
+static ble_scan_legacy_fn s_central_fn = NULL;
 
 // used in web_server_ble_scanner.c
 SemaphoreHandle_t scan_device_mutex = NULL; // for thread-safe update of scanning results
@@ -63,15 +70,31 @@ void set_ble_scanning(bool value) {
 
 // ── Scan event handler ────────────────────────────────────────────────── 
 
+static uint8_t consumers_snapshot(void) {
+    uint8_t value = 0;
+    if (scanning_status_mutex &&
+        xSemaphoreTake(scanning_status_mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+        value = s_consumers;
+        xSemaphoreGive(scanning_status_mutex);
+    } else if (!scanning_status_mutex) {
+        value = s_consumers;
+    }
+    return value;
+}
+
+void ble_scan_set_central_fn(ble_scan_legacy_fn fn) {
+    s_central_fn = fn;
+}
+
 static int ble_scanner_gap_event_handler(struct ble_gap_event *event, void *arg)
 {
-    struct ble_gap_conn_desc desc;
-    int rc;
-    
+    (void)arg;
+
     switch (event->type) {
-        
-    case BLE_GAP_EVENT_EXT_DISC:
-        if (is_ble_scanning()) {
+
+    case BLE_GAP_EVENT_EXT_DISC: {
+        uint8_t cons = consumers_snapshot();
+        if (cons & BLE_SCAN_CONSUMER_REMOTE) {
             process_scanned_device(event->ext_disc.addr.val,
                                  event->ext_disc.addr.type,
                                  event->ext_disc.rssi,
@@ -80,19 +103,65 @@ static int ble_scanner_gap_event_handler(struct ble_gap_event *event, void *arg)
                                  event->ext_disc.props,
                                  event->ext_disc.prim_phy);
         }
+        if (!is_legacy_adv(event->ext_disc.props)) break;
+        if (event->ext_disc.length_data == 0 || event->ext_disc.length_data > 31) break;
+        bool is_scan_rsp = (event->ext_disc.props & BLE_HCI_ADV_SCAN_RSP_MASK) != 0;
+        if (cons & BLE_SCAN_CONSUMER_SIM) {
+            ble_observe_on_legacy(event->ext_disc.addr.val,
+                                  event->ext_disc.addr.type,
+                                  event->ext_disc.rssi,
+                                  event->ext_disc.data,
+                                  event->ext_disc.length_data,
+                                  is_scan_rsp);
+        }
+        if ((cons & BLE_SCAN_CONSUMER_CENTRAL) && s_central_fn) {
+            s_central_fn(event->ext_disc.addr.val,
+                         event->ext_disc.addr.type,
+                         event->ext_disc.rssi,
+                         event->ext_disc.data,
+                         event->ext_disc.length_data,
+                         is_scan_rsp);
+        }
         break;
-        
+    }
+
     case BLE_GAP_EVENT_DISC_COMPLETE:
+        if (scanning_status_mutex &&
+            xSemaphoreTake(scanning_status_mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+            if (s_ignore_completes > 0) {
+                s_ignore_completes--;
+                xSemaphoreGive(scanning_status_mutex);
+                ESP_LOGI(TAG, "Scan restart complete ignored");
+                break;
+            }
+            xSemaphoreGive(scanning_status_mutex);
+        } else if (s_ignore_completes > 0) {
+            s_ignore_completes--;
+            ESP_LOGI(TAG, "Scan restart complete ignored");
+            break;
+        }
         ESP_LOGI(TAG, "Scan complete");
+        if (scanning_status_mutex &&
+            xSemaphoreTake(scanning_status_mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+            s_consumers = 0;
+            xSemaphoreGive(scanning_status_mutex);
+        } else {
+            s_consumers = 0;
+        }
+        s_forever = false;
         set_ble_scanning(false);
-        web_scan_broadcast_status();   // ← notify clients scan ended
+        web_scan_broadcast_status();
+        if (s_notify_sim_on_stop) {
+            s_notify_sim_on_stop = false;
+            ble_observe_on_forced_stop();
+        }
         break;
-                
+
     default:
         ESP_LOGW(TAG, "Unhandled GAP event: %d", event->type);
         break;
     }
-    
+
     return 0;
 }
 
@@ -436,50 +505,42 @@ esp_err_t ble_scanner_init(void)
     return ESP_OK;
 }
 
-esp_err_t start_ble_scan(bool connectable_only)
-{
+static void clear_web_results(void) {
+    if (!scan_device_mutex) return;
+    if (xSemaphoreTake(scan_device_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) return;
+    free_adv_payloads();
+    scanned_device_count = 0;
+    memset(scanned_devices, 0, sizeof(ble_scanned_device_t) * MAX_SCANNED_DEVICES);
+    xSemaphoreGive(scan_device_mutex);
+}
 
-    if (scanning_status_mutex == NULL || scan_device_mutex == NULL) {
-        ESP_LOGE(TAG, "System not initialized");
-        return ESP_FAIL;
-    }
-
-    if (is_ble_scanning()) {
-        ESP_LOGW(TAG, "Scan already in progress");
-        return ESP_ERR_INVALID_STATE;
+static esp_err_t disc_restart(bool forever) {
+    if (ble_gap_disc_active()) {
+        int rc_cancel = ble_gap_disc_cancel();
+        if (rc_cancel == 0) {
+            if (scanning_status_mutex &&
+                xSemaphoreTake(scanning_status_mutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+                s_ignore_completes++;
+                xSemaphoreGive(scanning_status_mutex);
+            } else {
+                s_ignore_completes++;
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(100));
     }
 
     if (ble_gap_conn_active()) {
         int rc_cancel = ble_gap_conn_cancel();
         if (rc_cancel != 0 && rc_cancel != BLE_HS_EALREADY && rc_cancel != BLE_HS_EDONE) {
             ESP_LOGW(TAG, "ble_gap_conn_cancel before scan failed: %d", rc_cancel);
-        } else if (rc_cancel == 0) {
-            ESP_LOGI(TAG, "Cancelled pending connection before starting scan");
         }
-        vTaskDelay(pdMS_TO_TICKS(300));
+        vTaskDelay(pdMS_TO_TICKS(100));
     }
 
     struct ble_gap_disc_params disc_params;
-    filter_connectable_only = connectable_only;
-    
-    if (xSemaphoreTake(scan_device_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
-        ESP_LOGE(TAG, "Failed to take mutex");
-        return ESP_FAIL;
-    }
-
-    free_adv_payloads();
-
-    scanned_device_count = 0;
-    memset(scanned_devices, 0, sizeof(ble_scanned_device_t) * MAX_SCANNED_DEVICES);
-    xSemaphoreGive(scan_device_mutex);
-    
     memset(&disc_params, 0, sizeof(disc_params));
     disc_params.filter_duplicates = 0;
     disc_params.passive = 0;
-    disc_params.itvl = 0;
-    disc_params.window = 0;
-    disc_params.filter_policy = 0;
-    disc_params.limited = 0;
 
     uint8_t own_addr_type;
     int rc = ble_central_infer_own_addr_type(&own_addr_type);
@@ -488,29 +549,143 @@ esp_err_t start_ble_scan(bool connectable_only)
         return ESP_FAIL;
     }
 
-    rc = ble_gap_disc(own_addr_type, BLE_SCAN_DURATION_MS,
-                      &disc_params, ble_scanner_gap_event_handler, NULL);
+    int32_t duration = forever ? BLE_HS_FOREVER : BLE_SCAN_DURATION_MS;
+    rc = ble_gap_disc(own_addr_type, duration, &disc_params,
+                      ble_scanner_gap_event_handler, NULL);
     if (rc != 0) {
         ESP_LOGE(TAG, "Failed to start scan: %d", rc);
         return ESP_FAIL;
     }
-    
+
+    s_forever = forever;
     set_ble_scanning(true);
-    ESP_LOGI(TAG, "Scan started (%ds) - %s", BLE_SCAN_DURATION_MS / 1000,
-            connectable_only ? "Connectable only" : "All devices");
-    web_scan_broadcast_status();   // ← notify clients scan started + clear old state
+    ESP_LOGI(TAG, "Scan started (%s)", forever ? "forever" : "30s");
+    web_scan_broadcast_status();
     return ESP_OK;
+}
+
+static bool consumers_need_forever(uint8_t cons) {
+    return (cons & (BLE_SCAN_CONSUMER_SIM | BLE_SCAN_CONSUMER_CENTRAL)) != 0;
+}
+
+esp_err_t ble_scan_subscribe(uint8_t consumer) {
+    if (scanning_status_mutex == NULL || scan_device_mutex == NULL) {
+        ESP_LOGE(TAG, "System not initialized");
+        return ESP_FAIL;
+    }
+    if (consumer == 0) return ESP_ERR_INVALID_ARG;
+
+    uint8_t next;
+    bool already;
+    if (xSemaphoreTake(scanning_status_mutex, pdMS_TO_TICKS(200)) != pdTRUE) {
+        return ESP_FAIL;
+    }
+    already = (s_consumers & consumer) != 0;
+    next = (uint8_t)(s_consumers | consumer);
+    if (!already) s_consumers = next;
+    xSemaphoreGive(scanning_status_mutex);
+
+    if (already && ble_gap_disc_active() && consumers_need_forever(next) == s_forever) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (consumer == BLE_SCAN_CONSUMER_REMOTE && !already) {
+        clear_web_results();
+    }
+
+    bool forever = consumers_need_forever(next);
+    if (ble_gap_disc_active() && forever == s_forever) {
+        return ESP_OK;
+    }
+    esp_err_t err = disc_restart(forever);
+    if (err != ESP_OK && !ble_gap_disc_active()) {
+        if (xSemaphoreTake(scanning_status_mutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+            s_consumers = (uint8_t)(s_consumers & ~consumer);
+            xSemaphoreGive(scanning_status_mutex);
+        }
+    }
+    return err;
+}
+
+esp_err_t ble_scan_unsubscribe(uint8_t consumer) {
+    if (scanning_status_mutex == NULL) return ESP_FAIL;
+    uint8_t next = 0;
+    if (xSemaphoreTake(scanning_status_mutex, pdMS_TO_TICKS(200)) != pdTRUE) return ESP_FAIL;
+    s_consumers = (uint8_t)(s_consumers & ~consumer);
+    next = s_consumers;
+    xSemaphoreGive(scanning_status_mutex);
+
+    if (next == 0) {
+        if (ble_gap_disc_active()) {
+            int rc = ble_gap_disc_cancel();
+            if (rc != 0 && rc != BLE_HS_EALREADY && rc != BLE_HS_EDONE) {
+                ESP_LOGW(TAG, "Scan cancel on last unsubscribe: %d", rc);
+            }
+        } else {
+            s_forever = false;
+            set_ble_scanning(false);
+        }
+        return ESP_OK;
+    }
+
+    bool forever = consumers_need_forever(next);
+    if (ble_gap_disc_active() && forever == s_forever) return ESP_OK;
+    return disc_restart(forever);
+}
+
+void ble_scan_force_stop(void) {
+    uint8_t prev = 0;
+    if (scanning_status_mutex &&
+        xSemaphoreTake(scanning_status_mutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+        prev = s_consumers;
+        s_consumers = 0;
+        xSemaphoreGive(scanning_status_mutex);
+    } else {
+        prev = s_consumers;
+        s_consumers = 0;
+    }
+
+    bool notify = (prev & BLE_SCAN_CONSUMER_SIM) != 0;
+    if (ble_gap_disc_active()) {
+        s_notify_sim_on_stop = notify;
+        int rc = ble_gap_disc_cancel();
+        if (rc != 0 && rc != BLE_HS_EALREADY && rc != BLE_HS_EDONE) {
+            ESP_LOGW(TAG, "Force-stop cancel failed: %d", rc);
+            s_notify_sim_on_stop = false;
+            if (notify) ble_observe_on_forced_stop();
+        }
+    } else if (notify) {
+        ble_observe_on_forced_stop();
+    }
+    s_forever = false;
+    set_ble_scanning(false);
+    web_scan_broadcast_status();
+    ESP_LOGI(TAG, "Scan force-stopped");
+}
+
+esp_err_t start_ble_scan(bool connectable_only)
+{
+    if (scanning_status_mutex == NULL || scan_device_mutex == NULL) {
+        ESP_LOGE(TAG, "System not initialized");
+        return ESP_FAIL;
+    }
+    if (s_consumers & BLE_SCAN_CONSUMER_REMOTE) {
+        ESP_LOGW(TAG, "Scan already in progress");
+        return ESP_ERR_INVALID_STATE;
+    }
+    filter_connectable_only = connectable_only;
+    clear_web_results();
+    ESP_LOGI(TAG, "Remote scan subscribe - %s",
+             connectable_only ? "Connectable only" : "All devices");
+    return ble_scan_subscribe(BLE_SCAN_CONSUMER_REMOTE);
 }
 
 esp_err_t stop_ble_scan(void)
 {
-    if (!is_ble_scanning()) return ESP_ERR_INVALID_STATE;
-    
-    int rc = ble_gap_disc_cancel();
-    if (rc != 0) return ESP_FAIL;
-    
-    set_ble_scanning(false);
-    ESP_LOGI(TAG, "Scan stopped");
+    if ((s_consumers & BLE_SCAN_CONSUMER_REMOTE) == 0 && !ble_gap_disc_active()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    ble_scan_force_stop();
     return ESP_OK;
 }
 
@@ -563,21 +738,9 @@ bool ble_scanned_device_info_add_to_json(cJSON *root, const ble_scanned_device_t
 
 
 esp_err_t ble_scanner_cleanup(void) {
-    int rc;
-    
     ESP_LOGI(TAG, "Deinitializing BLE scanner...");
-    
-    // Stop scanning if active
-    if (is_ble_scanning()) {
-        rc = ble_gap_disc_cancel();
-        if (rc != 0 && rc != BLE_HS_EALREADY) {
-            ESP_LOGE(TAG, "Failed to cancel scanning: %d", rc);
-            // Continue with cleanup anyway
-        } else {
-            ESP_LOGI(TAG, "Scanning stopped");
-            set_ble_scanning(false);
-        }
-    }
+
+    ble_scan_force_stop();
     
     // Clear scanned devices list
     if (scan_device_mutex != NULL) {
