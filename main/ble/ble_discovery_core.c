@@ -33,11 +33,7 @@ static const char *TAG = "BLE discovery - core";
 
 discovery_context_t *g_disc_ctx = NULL;
 static uint16_t discovery_conn_handle = BLE_HS_CONN_HANDLE_NONE;
-static bool g_cancelling_for_reconnect = false; 
-
-// external info from ble_scanner
-extern ble_scanned_device_t scanned_devices[MAX_SCANNED_DEVICES];
-extern int scanned_device_count;
+static bool g_cancelling_for_reconnect = false;
 
 // forward declarations
 static int ble_discovery_gap_event_handler(struct ble_gap_event *event, void *arg);
@@ -263,7 +259,9 @@ static int find_device_by_addr(const char *addr_str) {
         }
     }
 
-    for (int i = 0; i < scanned_device_count && i < MAX_SCANNED_DEVICES; i++) {
+    if (!scanned_devices) return -1;
+
+    for (int i = 0; i < scanned_device_count && i < scanned_device_cap; i++) {
         if (scanned_devices[i].valid &&
             memcmp(scanned_devices[i].addr, target, 6) == 0) {
             return i;
@@ -575,7 +573,8 @@ int ble_connect_and_discover(const char *addr_str, bool save_result, bool open_c
     int id = find_device_by_addr(addr_str);
     ble_addr_t target_addr;
 
-    if (id >= 0 && id < scanned_device_count && scanned_devices[id].valid) {
+    if (scanned_devices && id >= 0 && id < scanned_device_count &&
+        id < scanned_device_cap && scanned_devices[id].valid) {
         target_addr.type = scanned_devices[id].addr_type;
         memcpy(target_addr.val, scanned_devices[id].addr, 6);
     } else if (ble_central_cache_resolve_addr_str(addr_str, &target_addr)) {

@@ -23,8 +23,6 @@
 static const char *TAG = "web server - BLE scanner";
 
 extern volatile bool filter_connectable_only;
-extern ble_scanned_device_t scanned_devices[MAX_SCANNED_DEVICES];
-extern int scanned_device_count;
 extern SemaphoreHandle_t scan_device_mutex;
 
 
@@ -222,14 +220,17 @@ void web_scan_push_device(const ble_scanned_device_t *dev, scan_push_reason_t re
 void web_scan_dump_all(void) {
     // Optional: still useful for initial load or debug
     // Broadcast each device individually as scan_device messages (transient)
+    if (!scanned_devices) {
+        web_scan_broadcast_status();
+        return;
+    }
     if (xSemaphoreTake(scan_device_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) return;
-    for (int i = 0; i < scanned_device_count && i < MAX_SCANNED_DEVICES; i++) {
+    for (int i = 0; i < scanned_device_count && i < scanned_device_cap; i++) {
         if (scanned_devices[i].valid)
-            web_scan_push_device(&scanned_devices[i], SCAN_PUSH_DUMP);  // these save to state anyway
+            web_scan_push_device(&scanned_devices[i], SCAN_PUSH_DUMP);
     }
     xSemaphoreGive(scan_device_mutex);
     web_scan_broadcast_status();
-
 }
 
 // Call this from discovery_complete() after JSON metadata is annotated,

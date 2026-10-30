@@ -41,6 +41,12 @@ typedef struct {
     uint8_t           seen_count;      // entries used
 } __attribute__((packed, aligned(4))) ble_scanned_device_t;
 
+// Allocated when Remote Scan starts. NULL until then, and after scanner cleanup.
+// scanned_device_cap is the number of records in that block (200, or 100 if 200 did not fit).
+extern ble_scanned_device_t *scanned_devices;
+extern int scanned_device_count;
+extern int scanned_device_cap;
+
 // One shared discovery procedure. Consumers share it; nobody starts a second scan.
 #define BLE_SCAN_CONSUMER_REMOTE  0x01
 #define BLE_SCAN_CONSUMER_SIM     0x02

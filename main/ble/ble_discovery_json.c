@@ -13,8 +13,6 @@
 
 static const char *TAG = "BLE discovery - JSON";
 
-// external info from ble_scanner
-extern ble_scanned_device_t scanned_devices[MAX_SCANNED_DEVICES];
 extern pairing_attempt_context_t g_pairing_attempt;
 
 // ── Json building ────────────────────────────────────────────────── 
@@ -231,7 +229,10 @@ void build_services_json(discovery_context_t *ctx)
 
 
     // Add device info
-    ble_scanned_device_info_add_to_json(ctx->json_root, &scanned_devices[ctx->device_id]);
+    if (scanned_devices && ctx->device_id < scanned_device_count &&
+        ctx->device_id < scanned_device_cap) {
+        ble_scanned_device_info_add_to_json(ctx->json_root, &scanned_devices[ctx->device_id]);
+    }
     
     // Print JSON
     char *json_string = cJSON_PrintUnformatted(ctx->json_root); // Unformatted produces smaller string (no indentation/newlines)

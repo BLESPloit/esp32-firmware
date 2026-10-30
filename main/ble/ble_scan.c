@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -13,6 +14,7 @@
 #include "host/util/util.h"
 #include "services/gap/ble_svc_gap.h"
 #include "esp_event.h"
+#include "esp_heap_caps.h"
 #include "cJSON.h"
 
 // #include "ble.h"
@@ -29,8 +31,9 @@ static const char *TAG = "BLE scan";
 // ── Global state: scanning ────────────────────────────────────────────────── 
 
 volatile bool filter_connectable_only = false;
-ble_scanned_device_t scanned_devices[MAX_SCANNED_DEVICES];
+ble_scanned_device_t *scanned_devices = NULL;
 int scanned_device_count = 0;
+int scanned_device_cap = 0;
 
 static bool ble_scanning = false;
 static SemaphoreHandle_t scanning_status_mutex = NULL; // for thread-safe update of scanning status
@@ -289,6 +292,7 @@ static bool adv_payload_mark_seen(ble_scanned_device_t *dev,
 // Free any seen-payload sets from previous scan
 static void free_adv_payloads(void)
 {
+    if (!scanned_devices) return;
     for (int i = 0; i < scanned_device_count; i++) {
         if (scanned_devices[i].seen_payloads) {
             free(scanned_devices[i].seen_payloads);
@@ -320,10 +324,14 @@ void process_scanned_device(uint8_t *addr, uint8_t addr_type, int8_t rssi,
     if (xSemaphoreTake(scan_device_mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
         return;
     }
+    if (!scanned_devices || scanned_device_cap <= 0) {
+        xSemaphoreGive(scan_device_mutex);
+        return;
+    }
     
     // Find existing device
     int device_idx = -1;
-    for (int i = 0; i < scanned_device_count && i < MAX_SCANNED_DEVICES; i++) {
+    for (int i = 0; i < scanned_device_count && i < scanned_device_cap; i++) {
         if (scanned_devices[i].valid && memcmp(scanned_devices[i].addr, addr, 6) == 0) {
             device_idx = i;
             break;
@@ -332,7 +340,7 @@ void process_scanned_device(uint8_t *addr, uint8_t addr_type, int8_t rssi,
     
     if (device_idx == -1) {
         // New device
-        if (scanned_device_count < MAX_SCANNED_DEVICES && !is_scan_rsp) {
+        if (scanned_device_count < scanned_device_cap && !is_scan_rsp) {
             device_idx = scanned_device_count;
             memset(&scanned_devices[device_idx], 0, sizeof(ble_scanned_device_t));
             
@@ -375,7 +383,7 @@ void process_scanned_device(uint8_t *addr, uint8_t addr_type, int8_t rssi,
         }
     } else {
         // Existing device
-        if (device_idx >= 0 && device_idx < MAX_SCANNED_DEVICES) {
+        if (device_idx >= 0 && device_idx < scanned_device_cap) {
             scanned_devices[device_idx].rssi = rssi;
 
             if (!is_scan_rsp) {
@@ -505,12 +513,58 @@ esp_err_t ble_scanner_init(void)
     return ESP_OK;
 }
 
+static void *alloc_scan_block(size_t bytes)
+{
+    void *block = NULL;
+#if CONFIG_SPIRAM
+    block = heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+#endif
+    if (!block) block = malloc(bytes);
+    return block;
+}
+
+// One block for the life of the result list. 200 records, or 100 if that does not fit.
+// A later scan reuses the block and does not shrink it.
+static esp_err_t ensure_scan_table(void)
+{
+    if (scanned_devices) return ESP_OK;
+
+    int cap = MAX_SCANNED_DEVICES;
+    size_t bytes = (size_t)cap * sizeof(ble_scanned_device_t);
+    void *block = alloc_scan_block(bytes);
+    if (!block) {
+        cap = MAX_SCANNED_DEVICES / 2;
+        bytes = (size_t)cap * sizeof(ble_scanned_device_t);
+        block = alloc_scan_block(bytes);
+    }
+    if (!block) {
+        ESP_LOGE(TAG, "Remote scan table allocation failed");
+        return ESP_ERR_NO_MEM;
+    }
+    memset(block, 0, bytes);
+    scanned_devices = block;
+    scanned_device_cap = cap;
+    ESP_LOGI(TAG, "Remote scan table: %d devices", cap);
+    return ESP_OK;
+}
+
+static void release_scan_table(void)
+{
+    free_adv_payloads();
+    free(scanned_devices);
+    scanned_devices = NULL;
+    scanned_device_count = 0;
+    scanned_device_cap = 0;
+}
+
 static void clear_web_results(void) {
     if (!scan_device_mutex) return;
     if (xSemaphoreTake(scan_device_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) return;
     free_adv_payloads();
     scanned_device_count = 0;
-    memset(scanned_devices, 0, sizeof(ble_scanned_device_t) * MAX_SCANNED_DEVICES);
+    if (scanned_devices && scanned_device_cap > 0) {
+        memset(scanned_devices, 0, sizeof(ble_scanned_device_t) * (size_t)scanned_device_cap);
+    }
     xSemaphoreGive(scan_device_mutex);
 }
 
@@ -674,6 +728,13 @@ esp_err_t start_ble_scan(bool connectable_only)
         return ESP_ERR_INVALID_STATE;
     }
     filter_connectable_only = connectable_only;
+    if (xSemaphoreTake(scan_device_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        return ESP_FAIL;
+    }
+    esp_err_t alloc_err = ESP_OK;
+    if (!scanned_devices) alloc_err = ensure_scan_table();
+    xSemaphoreGive(scan_device_mutex);
+    if (alloc_err != ESP_OK) return alloc_err;
     clear_web_results();
     ESP_LOGI(TAG, "Remote scan subscribe - %s",
              connectable_only ? "Connectable only" : "All devices");
@@ -745,13 +806,12 @@ esp_err_t ble_scanner_cleanup(void) {
     // Clear scanned devices list
     if (scan_device_mutex != NULL) {
         if (xSemaphoreTake(scan_device_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-            free_adv_payloads();
-            scanned_device_count = 0;
-            memset(scanned_devices, 0, sizeof(ble_scanned_device_t) * MAX_SCANNED_DEVICES);
+            release_scan_table();
             xSemaphoreGive(scan_device_mutex);
             ESP_LOGI(TAG, "Cleared scanned devices list");
         } else {
             ESP_LOGW(TAG, "Failed to take mutex for cleanup");
+            release_scan_table();
         }
         
         // Delete the mutex
