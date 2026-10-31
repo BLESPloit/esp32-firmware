@@ -1,8 +1,12 @@
 #include <sdkconfig.h>
+#include <assert.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_panel_vendor.h"
 #include "driver/gpio.h"
+#include "esp_err.h"
 #include "esp_log.h"
 #include "esp_idf_version.h"
 #include "driver/spi_master.h"
@@ -24,6 +28,7 @@
 
 #define DISPLAY_W              CONFIG_BLESPLOIT_DISPLAY_WIDTH
 #define DISPLAY_H              CONFIG_BLESPLOIT_DISPLAY_HEIGHT
+#define FLUSH_CHUNK_PIXELS     2048
 
 static const char *TAG = "Display";
 
@@ -31,15 +36,29 @@ static esp_lcd_panel_io_handle_t io_handle = NULL;
 static esp_lcd_panel_handle_t panel_handle = NULL;
 static void (*flush_ready_callback)(void) = NULL;
 
+// Internal BSS (not EXT_RAM). One strip is at most 4 KB so SPI DMA never
+// bounce-allocates a full-frame buffer from internal RAM.
+static uint16_t chunk_buf[FLUSH_CHUNK_PIXELS] __attribute__((aligned(64)));
+static SemaphoreHandle_t color_done_sem = NULL;
+static volatile bool notify_flush_ready = false;
+
 
 static bool display_on_trans_done(esp_lcd_panel_io_handle_t panel_io,
                                   esp_lcd_panel_io_event_data_t *edata,
                                   void *user_ctx)
 {
-    if (flush_ready_callback) {
+    BaseType_t woken = pdFALSE;
+
+    if (notify_flush_ready && flush_ready_callback) {
         flush_ready_callback();  // calls lv_display_flush_ready() in lvgl_ui.c
     }
-    return false;
+    if (color_done_sem) {
+        xSemaphoreGiveFromISR(color_done_sem, &woken);
+    }
+    if (woken == pdTRUE) {
+        portYIELD_FROM_ISR(woken);
+    }
+    return woken == pdTRUE;
 }
 
 void display_set_flush_ready_cb(void (*callback)(void))
@@ -47,32 +66,79 @@ void display_set_flush_ready_cb(void (*callback)(void))
     flush_ready_callback = callback;
 }
 
+static void flush_signal_ready(void)
+{
+    if (flush_ready_callback) {
+        flush_ready_callback();
+    }
+}
+
 void display_push_colors(uint16_t x, uint16_t y, uint16_t width, uint16_t height, uint8_t *data)
 {
-    size_t total_pixels = width * height;
-    uint16_t *chunk_buf = heap_caps_malloc(total_pixels * sizeof(uint16_t),
-                                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    assert(chunk_buf);
-
-    // LVGL 9 XRGB8888 in memory (little-endian): byte0=B, byte1=G, byte2=R, byte3=X
-    // GC9A01 panel is configured BGR, so we feed R5G6B5 with R in high bits.
-    uint8_t *src = data;
-    for (size_t i = 0; i < total_pixels; i++) {
-        uint8_t b = src[i*4 + 0];
-        uint8_t g = src[i*4 + 1];
-        uint8_t r = src[i*4 + 2];
-        // RGB565, big-endian (bswap for SPI)
-        chunk_buf[i] = __builtin_bswap16(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
+    if (width == 0 || height == 0) {
+        flush_signal_ready();
+        return;
+    }
+    // One row must fit in chunk_buf. This panel is 128 wide.
+    if (width > FLUSH_CHUNK_PIXELS) {
+        ESP_LOGE(TAG, "flush width %u exceeds chunk", width);
+        flush_signal_ready();
+        return;
     }
 
-    esp_lcd_panel_draw_bitmap(panel_handle, x, y, x + width, y + height, chunk_buf);
-    heap_caps_free(chunk_buf);
+    uint16_t rows_done = 0;
+    bool signaled = false;
+    while (rows_done < height) {
+        uint16_t rows_left = height - rows_done;
+        uint16_t max_rows = FLUSH_CHUNK_PIXELS / width;
+        if (max_rows < 1) {
+            max_rows = 1;
+        }
+        uint16_t rows = rows_left < max_rows ? rows_left : max_rows;
+        size_t pixels = (size_t)width * rows;
+        // LVGL 9 XRGB8888 in memory (little-endian): byte0=B, byte1=G, byte2=R, byte3=X
+        // GC9A01 panel is configured BGR, so we feed R5G6B5 with R in high bits.
+        const uint8_t *src = data + ((size_t)rows_done * width * 4);
+        for (size_t i = 0; i < pixels; i++) {
+            uint8_t b = src[i * 4 + 0];
+            uint8_t g = src[i * 4 + 1];
+            uint8_t r = src[i * 4 + 2];
+            // RGB565, big-endian (bswap for SPI)
+            chunk_buf[i] = __builtin_bswap16(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
+        }
+
+        bool last = (uint16_t)(rows_done + rows) >= height;
+        notify_flush_ready = last;
+
+        esp_err_t err = esp_lcd_panel_draw_bitmap(panel_handle,
+                                                   x, y + rows_done,
+                                                   x + width, y + rows_done + rows,
+                                                   chunk_buf);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "draw_bitmap failed: %s", esp_err_to_name(err));
+            notify_flush_ready = false;
+            if (!signaled) {
+                flush_signal_ready();
+            }
+            return;
+        }
+
+        // draw_bitmap queues DMA and returns. chunk_buf stays live until this completes.
+        xSemaphoreTake(color_done_sem, portMAX_DELAY);
+        if (last) {
+            signaled = true;
+        }
+        rows_done = (uint16_t)(rows_done + rows);
+    }
 }
 
 
 void display_init(void)
 {
     ESP_LOGI(TAG, "============T-QT-PRO-S3============");
+
+    color_done_sem = xSemaphoreCreateBinary();
+    assert(color_done_sem);
 
     spi_bus_config_t buscfg = {
         .sclk_io_num = BOARD_SPI_SCK,
