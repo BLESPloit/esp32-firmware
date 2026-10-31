@@ -400,6 +400,23 @@ bool gfx_add_text_element(const char *id, const char *text,
     return true;
 }
 
+// Raise shown elements in graphics.json order. A later entry paints over an earlier one.
+// Runtime elements (gfx_add_text_element) are appended, so they stay above file entries.
+// The doomed SVG from a color refresh is no longer referenced, so it stays behind until deleted.
+static void gfx_restack_screen(void)
+{
+    if (!g_manager) return;
+    if (!lvgl_lock(-1)) return;
+
+    for (int i = 0; i < g_manager->element_count; i++) {
+        lv_obj_t *obj = g_manager->elements[i].lvgl_obj;
+        if (obj && lv_obj_is_valid(obj))
+            lv_obj_move_foreground(obj);
+    }
+
+    lvgl_unlock();
+}
+
 void gfx_render_text(const char *id, const gfx_coords_t *coords, uint32_t color)
 {
     gfx_element_t *e = graphics_find_by_id(id);
@@ -421,6 +438,7 @@ void gfx_render_text(const char *id, const gfx_coords_t *coords, uint32_t color)
     }
 
     websocket_print_text(id, e->data, c->align, c->x, c->y, color, e->size);
+    gfx_restack_screen();
     ESP_LOGI(TAG, "Rendered Text %s", id);
 }
 
@@ -474,6 +492,7 @@ void gfx_render_png(const char *id)
     snprintf(ws_path, sizeof(ws_path), "%s/%s",
              current_simulated_device, e->data);
     websocket_render_png(id, ws_path, c);
+    gfx_restack_screen();
 
     ESP_LOGI(TAG, "Rendered PNG '%s' align=%d x=%d y=%d w=%d h=%d",
              id, c->align, c->x, c->y, c->w, c->h);
@@ -510,6 +529,7 @@ void gfx_render_svg(const char *id)
              current_simulated_device, e->data);
     
     websocket_render_svg(id, ws_path, c, e->color_provided, e->color);
+    gfx_restack_screen();
 
     ESP_LOGI(TAG, "Rendered SVG '%s' align=%d x=%d y=%d sz_px=%d color_provided=%d color=%06lX",
              id, c->align, c->x, c->y, sz_px, e->color_provided, (unsigned long)e->color);
