@@ -23,6 +23,36 @@ static const char *TAG = "usb_net";
 #define USB_RX_POOL_SLOTS 4
 #define USB_RX_FRAME_MAX  1514
 
+// Host-facing NCM address. The string must already be in the descriptor table
+// when tinyusb_driver_install() connects: a host that reads it earlier gets
+// the component default "" and rejects the function (Windows Code 10, Android 4.14 cdc_ncm). 
+// tinyusb_net_init() republishes the same bytes afterward. 
+static const uint8_t s_ncm_mac[6] = { 0x02, 0x02, 0x11, 0x22, 0x33, 0x01 };
+static char s_ncm_mac_str[] = "020211223301";
+
+// Same order and #ifs as esp_tinyusb descriptor_str_default, so string indexes
+// stay aligned with the default configuration descriptor. 
+static const char s_usb_langid[] = { 0x09, 0x04 };
+static const char *s_usb_str_desc[] = {
+    s_usb_langid,
+    CONFIG_TINYUSB_DESC_MANUFACTURER_STRING,
+    CONFIG_TINYUSB_DESC_PRODUCT_STRING,
+    CONFIG_TINYUSB_DESC_SERIAL_STRING,
+#if CONFIG_TINYUSB_CDC_ENABLED
+    CONFIG_TINYUSB_DESC_CDC_STRING,
+#endif
+#if CONFIG_TINYUSB_MSC_ENABLED
+    CONFIG_TINYUSB_DESC_MSC_STRING,
+#endif
+#if CONFIG_TINYUSB_NET_MODE_ECM_RNDIS || CONFIG_TINYUSB_NET_MODE_NCM
+    "USB net",
+    s_ncm_mac_str,
+#endif
+#if CFG_TUD_VENDOR
+    "Vendor specific",
+#endif
+};
+
 static esp_netif_t *s_usb_netif;
 static uint8_t s_rx_pool[USB_RX_POOL_SLOTS][USB_RX_FRAME_MAX];
 static bool s_rx_pool_used[USB_RX_POOL_SLOTS];
@@ -227,9 +257,15 @@ static void usb_event_callback(tinyusb_event_t *event, void *arg)
 
 esp_err_t usb_net_init(void)
 {
+    snprintf(s_ncm_mac_str, sizeof(s_ncm_mac_str), "%02X%02X%02X%02X%02X%02X",
+             s_ncm_mac[0], s_ncm_mac[1], s_ncm_mac[2],
+             s_ncm_mac[3], s_ncm_mac[4], s_ncm_mac[5]);
+
     tinyusb_config_t tusb_cfg = TINYUSB_DEFAULT_CONFIG();
     tusb_cfg.event_cb = usb_event_callback;
     tusb_cfg.event_arg = NULL;
+    tusb_cfg.descriptor.string = s_usb_str_desc;
+    tusb_cfg.descriptor.string_count = sizeof(s_usb_str_desc) / sizeof(s_usb_str_desc[0]);
 
     ESP_RETURN_ON_ERROR(tinyusb_driver_install(&tusb_cfg), TAG, "tinyusb_driver_install failed");
 
@@ -244,7 +280,8 @@ esp_err_t usb_net_init(void)
     ESP_RETURN_ON_ERROR(tinyusb_cdcacm_init(&acm_cfg), TAG, "tinyusb_cdcacm_init failed");
 
     const tinyusb_net_config_t net_cfg = {
-        .mac_addr = { 0x02, 0x02, 0x11, 0x22, 0x33, 0x01 },
+        .mac_addr = { s_ncm_mac[0], s_ncm_mac[1], s_ncm_mac[2],
+                      s_ncm_mac[3], s_ncm_mac[4], s_ncm_mac[5] },
         .on_recv_callback = usb_netif_recv,
         .on_init_callback = NULL,
     };
