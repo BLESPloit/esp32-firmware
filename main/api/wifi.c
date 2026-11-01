@@ -583,7 +583,7 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
 {
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
         ESP_LOGI(TAG, "Connecting to WiFi...");
-        disp_show_temp_label("Connecting to wifi...", 0);
+        disp_show_temp_label("Connecting to wifi...", 0, 0);
         esp_wifi_connect();
         wifi_broadcast_status();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
@@ -617,7 +617,7 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
 
         char ip_str[64];
         snprintf(ip_str, sizeof(ip_str), "IP: " IPSTR, IP2STR(&event->ip_info.ip));
-        disp_show_temp_label(ip_str, 10000);
+        disp_show_temp_label(ip_str, 10000, 0);
 
         s_retry_num = 0;
         start_web_server();
@@ -627,7 +627,7 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
         ESP_LOGI(TAG, "Station %02x:%02x:%02x:%02x:%02x:%02x joined AP",
                  event->mac[0], event->mac[1], event->mac[2],
                  event->mac[3], event->mac[4], event->mac[5]);
-        disp_show_temp_label("192.168.4.1", 0);
+        disp_show_temp_label("192.168.4.1", 0, 0);
     }
 }
 
@@ -674,7 +674,7 @@ static void start_ap_mode(void)
 
     char disp_msg[96];
     snprintf(disp_msg, sizeof(disp_msg), "WIFI AP: %s", ap_ssid);
-    disp_show_temp_label(disp_msg, 10000);
+    disp_show_temp_label(disp_msg, 10000, 0);
 
     start_web_server();
     wifi_broadcast_status();

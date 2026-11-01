@@ -108,8 +108,40 @@ void hide_temp_label_timer_cb(lv_timer_t *timer) {
     hide_timer = NULL;
 }
 
+// convert font size (percentage of shorter screen) to nearest px of included Montserrat
+// size 0 means 10% (Lua notification default). 
+static const lv_font_t *font_for_size_pct(uint8_t size_pct)
+{
+    static const int face_px[] = { 10, 12, 14, 16, 18 };
+    static const lv_font_t *const face_font[] = {
+        &lv_font_montserrat_10,
+        &lv_font_montserrat_12,
+        &lv_font_montserrat_14,
+        &lv_font_montserrat_16,
+        &lv_font_montserrat_18,
+    };
 
-void disp_show_temp_label(const char *text, uint16_t milliseconds) {
+    if (size_pct == 0) size_pct = 10;
+
+    int base = g_display.w < g_display.h ? (int)g_display.w : (int)g_display.h;
+    if (base < 1) base = 1;
+    int px = ((int)size_pct * base) / 100;
+    if (px < 1) px = 1;
+
+    int best = 0;
+    int best_dist = px > face_px[0] ? px - face_px[0] : face_px[0] - px;
+    for (int i = 1; i < 5; i++) {
+        int dist = px > face_px[i] ? px - face_px[i] : face_px[i] - px;
+        if (dist < best_dist) {
+            best = i;
+            best_dist = dist;
+        }
+    }
+    return face_font[best];
+}
+
+
+void disp_show_temp_label(const char *text, uint16_t milliseconds, uint8_t size_pct) {
     ESP_LOGI("UI", "Showing temp label: %s", text);
     
 
@@ -150,7 +182,7 @@ void disp_show_temp_label(const char *text, uint16_t milliseconds) {
         
         // Style the label
         lv_obj_set_style_text_color(label, lv_color_hex(0xFFFFFF), 0);
-        lv_obj_set_style_text_font(label, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_font(label, font_for_size_pct(size_pct), 0);
         lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
         
         lv_obj_center(label);
@@ -404,22 +436,8 @@ lv_obj_t *disp_render_text(const char *text, int x, int y, lv_align_t lvalign, u
     // ── label ───────────────────────────────────────────────────────── 
     lv_obj_t *label = lv_label_create(bg);
     if (label) {
-        static lv_style_t style;
-        lv_style_init(&style);
-
-        const lv_font_t *font;
-        switch (size_pct) {
-            case 0  ... 5:  font = &lv_font_montserrat_8;  break;
-            case 6  ... 10: font = &lv_font_montserrat_12; break;
-            case 11 ... 20: font = &lv_font_montserrat_16; break;
-            default:        font = &lv_font_montserrat_22; break;
-        }
-        if (!font) font = LV_FONT_DEFAULT;
-
-        lv_style_set_text_font(&style, font);
-        lv_style_set_text_font(&style, &lv_font_montserrat_14);
-        lv_style_set_text_color(&style, lv_color_hex(color));
-        lv_obj_add_style(label, &style, 0);
+        lv_obj_set_style_text_font(label, font_for_size_pct(size_pct), 0);
+        lv_obj_set_style_text_color(label, lv_color_hex(color), 0);
 
         lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
         lv_obj_set_width(label, LV_PCT(100)); 

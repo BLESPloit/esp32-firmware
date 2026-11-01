@@ -154,7 +154,7 @@ void disp_clear_screen(void);
 
 
 // ── Transient / notification ──────────────────────────────────────────────
-void disp_show_temp_label(const char *text, uint16_t milliseconds);
+void disp_show_temp_label(const char *text, uint16_t milliseconds, uint8_t size_pct);
 
 lv_obj_t *disp_render_text(const char *text, int x, int y,
                             lv_align_t lvalign, uint8_t sizepct, uint32_t color);

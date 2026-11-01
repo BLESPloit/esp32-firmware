@@ -617,7 +617,7 @@ void gfx_print_notification(const char *text,
                             uint16_t duration_ms)
 {
     // LVGL: transient label
-    disp_show_temp_label(text, duration_ms); 
+    disp_show_temp_label(text, duration_ms, size); 
 
     // Web
     websocket_print_notification(text, align, x, y, color, size, duration_ms);
