@@ -17,6 +17,7 @@ typedef struct {
     char *advertisement; // advertisement definitions, by default adv.json
     char *entry;      // roles.peripheral.entry  (Lua)
     char *interface;  // roles.peripheral.interface
+    // Sim addr on LVGL display. Missing manifest key is on; JSON false is the only off.
     bool show_adv_address;
     // roles.peripheral.observe. Absent/false leaves observe false.
     // "observe": true matches every legacy PDU. An object may seed the filter.

@@ -29,6 +29,8 @@ void disp_show_temp_label(const char *text, uint16_t milliseconds, uint8_t size_
 lv_obj_t *disp_render_text(const char *text, int x, int y,
                             lv_align_t lvalign, uint8_t sizepct, uint32_t color) { return NULL; };
 bool      disp_update_text(lv_obj_t *bg, const char *text, uint32_t color) { return true;};
+void      disp_show_adv_addr(const char *text) { (void)text; }
+void      disp_clear_adv_addr(void) {}
 
 
 // PNG

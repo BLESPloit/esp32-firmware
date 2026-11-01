@@ -160,6 +160,10 @@ lv_obj_t *disp_render_text(const char *text, int x, int y,
                             lv_align_t lvalign, uint8_t sizepct, uint32_t color);
 bool      disp_update_text(lv_obj_t *bg, const char *text, uint32_t color);
 
+// Simulation address bar on lv_layer_top(). LVGL-only, not broadcast to the sim canvas.
+void disp_show_adv_addr(const char *text);
+void disp_clear_adv_addr(void);
+
 
 // PNG
 lv_obj_t *disp_render_png(const uint8_t *png_buf, size_t png_len, int x, int y, int w, int h);

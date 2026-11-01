@@ -11,7 +11,7 @@ void ble_adv_set_free(ble_adv_set_t *set);
 
 cJSON *ble_adv_set_to_json(void);
 
-// Redraw the top "_adv_addr" overlay for this profile when the manifest asked for it.
+// Redraw the panel MAC bar unless the manifest set show_adv_address false. Not sent to the sim canvas.
 void        ble_sim_refresh_adv_address(const ble_adv_instance_t *inst);
 
 // needed by lua to enable/disable advertising profile

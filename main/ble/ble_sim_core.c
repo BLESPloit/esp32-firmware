@@ -32,7 +32,6 @@ static const char *TAG = "BLE sim - core";
 
 static bool s_ble_sim_teardown = false;
 static bool s_show_adv_address = false;
-static char s_adv_addr_device[64];
 
 static void ble_sim_format_adv_addr(const ble_adv_params_t *p, char *out, size_t out_len)
 {
@@ -56,25 +55,11 @@ void ble_sim_refresh_adv_address(const ble_adv_instance_t *inst)
 
     char addr_text[32];
     ble_sim_format_adv_addr(&inst->params, addr_text, sizeof(addr_text));
-    if (addr_text[0] == '\0') return;
-
-    char label_text[128];
-    if (inst->params.id[0] != '\0' && s_adv_addr_device[0] != '\0') {
-        snprintf(label_text, sizeof(label_text), "%s:%s %s",
-                 s_adv_addr_device, inst->params.id, addr_text);
-    } else if (inst->params.id[0] != '\0') {
-        snprintf(label_text, sizeof(label_text), "%s %s", inst->params.id, addr_text);
-    } else {
-        snprintf(label_text, sizeof(label_text), "%s", addr_text);
+    if (addr_text[0] == '\0') {
+        disp_clear_adv_addr();
+        return;
     }
-
-    if (graphics_find_by_id("_adv_addr")) {
-        gfx_update_text("_adv_addr", label_text, 0xFFFFFF);
-    } else if (gfx_add_text_element("_adv_addr", label_text,
-                                    GFX_ALIGN_TOP_CENTER, 0, 0,
-                                    0xFFFFFF, 5)) {
-        gfx_render_text("_adv_addr", NULL, 0xFFFFFF);
-    }
+    disp_show_adv_addr(addr_text);
 }
 
 bool ble_sim_teardown_active(void) { return s_ble_sim_teardown; }
@@ -190,7 +175,7 @@ esp_err_t load_ble_device_for_simulation(const char *device_id) {
     size_t filesize;
 
     s_show_adv_address = false;
-    s_adv_addr_device[0] = '\0';
+    disp_clear_adv_addr();
     ESP_LOGI(TAG, "Loading for simulation device: %s", device_id);
 
     // Read manifest.json and resolve all file paths from it
@@ -280,9 +265,7 @@ esp_err_t load_ble_device_for_simulation(const char *device_id) {
         return ESP_FAIL;
     }
 
-    // show addres also as a fallback if there's no lua (so no graphic)
-    s_show_adv_address = paths->peripheral->show_adv_address || !lua_available;
-    strlcpy(s_adv_addr_device, device_id, sizeof(s_adv_addr_device));
+    s_show_adv_address = paths->peripheral->show_adv_address;
 
     // paths no longer needed after this point
     device_paths_free(paths);
@@ -443,7 +426,7 @@ esp_err_t stop_ble_simulation(void) {
 // free resources, unload graphics ...
 void unload_ble_device_for_simulation(void) {
     s_show_adv_address = false;
-    s_adv_addr_device[0] = '\0';
+    disp_clear_adv_addr();
     ESP_LOGI(TAG, "Unloading BLE device simulation...");
 
     // Stop BLE simulation and clear GATT structures

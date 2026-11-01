@@ -16,6 +16,7 @@
 #include "common/storage.h"
 #include "common/utils.h"
 
+#include "sdkconfig.h"
 #include "graphics/graphics.h"
 
 static const char *TAG = "LVGL UI";
@@ -24,6 +25,16 @@ extern device_config_t config;
 
 static lv_obj_t *temp_label = NULL;
 static lv_timer_t *hide_timer = NULL;
+static lv_obj_t *s_adv_addr_box = NULL;
+static lv_obj_t *s_adv_addr_label = NULL;
+
+// Battery chip in battery_ui.c: 56x16 at TOP_RIGHT (-2, 2). The bar starts
+// after pad 1 + the 28px percentage + a 2px gap.
+#define ADV_ADDR_M5_CHIP_W     56
+#define ADV_ADDR_M5_CHIP_INSET 2
+#define ADV_ADDR_M5_CHIP_Y     2
+#define ADV_ADDR_M5_CHIP_H     16
+#define ADV_ADDR_M5_BAR_OFF    31
 
 
 // Forward declarations for the LodePNG functions we use directly:
@@ -412,6 +423,97 @@ static void apply_text_plate(lv_obj_t *bg, uint32_t text_color)
     }
     lv_obj_set_style_bg_color(bg, plate, 0);
     lv_obj_set_style_bg_opa(bg, opa, 0);
+}
+
+static int32_t adv_addr_m5_box_w(void)
+{
+    int32_t chip_left = (int32_t)g_display.w - ADV_ADDR_M5_CHIP_INSET - ADV_ADDR_M5_CHIP_W;
+    int32_t bar_left = chip_left + ADV_ADDR_M5_BAR_OFF;
+    if (bar_left < 1) bar_left = 1;
+    return bar_left;
+}
+
+static void adv_addr_style_label(lv_obj_t *label, const lv_font_t *font)
+{
+    lv_obj_set_style_text_font(label, font, 0);
+    lv_obj_set_style_text_color(label, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_bg_opa(label, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_pad_all(label, 0, 0);
+    lv_obj_set_style_border_width(label, 0, 0);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_CLIP);
+    lv_obj_clear_flag(label, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(label, LV_OBJ_FLAG_SCROLLABLE);
+}
+
+void disp_clear_adv_addr(void)
+{
+    if (s_adv_addr_box == NULL && s_adv_addr_label == NULL) return;
+    if (!lvgl_lock(-1)) return;
+    if (s_adv_addr_box != NULL && lv_obj_is_valid(s_adv_addr_box)) {
+        lv_obj_del(s_adv_addr_box);
+    }
+    s_adv_addr_box = NULL;
+    s_adv_addr_label = NULL;
+    lvgl_unlock();
+}
+
+// Montserrat 10, black on a white box. On the M5 the box is the battery row
+// to the left of the bar, so it covers the battery percentage. 
+// Elsewhere the address is centered on the top edge.
+void disp_show_adv_addr(const char *text)
+{
+    if (text == NULL || text[0] == '\0') {
+        disp_clear_adv_addr();
+        return;
+    }
+    if (!lvgl_lock(-1)) return;
+
+    const lv_font_t *font = &lv_font_montserrat_10;
+    lv_point_t sz;
+    lv_text_get_size(&sz, text, font, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    int32_t text_w = sz.x;
+    if (text_w < 1) text_w = 1;
+
+#ifdef CONFIG_BLESPLOIT_BOARD_M5STICKS3
+    const bool on_m5 = true;
+    int32_t box_w = adv_addr_m5_box_w();
+#else
+    const bool on_m5 = false;
+    int32_t box_w = (int32_t)g_display.w;
+    if (box_w < 1) box_w = 1;
+    if (text_w < box_w) box_w = text_w;
+#endif
+
+    if (s_adv_addr_box == NULL || !lv_obj_is_valid(s_adv_addr_box)) {
+        s_adv_addr_box = lv_obj_create(lv_layer_top());
+        lv_obj_set_style_border_width(s_adv_addr_box, 0, 0);
+        lv_obj_set_style_radius(s_adv_addr_box, 0, 0);
+        lv_obj_set_style_pad_all(s_adv_addr_box, 0, 0);
+        lv_obj_set_scrollbar_mode(s_adv_addr_box, LV_SCROLLBAR_MODE_OFF);
+        lv_obj_clear_flag(s_adv_addr_box, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_clear_flag(s_adv_addr_box, LV_OBJ_FLAG_SCROLLABLE);
+
+        s_adv_addr_label = lv_label_create(s_adv_addr_box);
+        adv_addr_style_label(s_adv_addr_label, font);
+    }
+
+    if (on_m5) {
+        lv_obj_set_size(s_adv_addr_box, box_w, ADV_ADDR_M5_CHIP_H);
+        lv_obj_align(s_adv_addr_box, LV_ALIGN_TOP_LEFT, 0, ADV_ADDR_M5_CHIP_Y);
+        lv_obj_set_style_bg_color(s_adv_addr_box, lv_color_white(), 0);
+        lv_obj_set_style_bg_opa(s_adv_addr_box, LV_OPA_COVER, 0);
+    } else {
+        lv_obj_set_size(s_adv_addr_box, box_w, LV_SIZE_CONTENT);
+        lv_obj_align(s_adv_addr_box, LV_ALIGN_TOP_MID, 0, ADV_ADDR_M5_CHIP_Y);
+        lv_obj_set_style_bg_opa(s_adv_addr_box, LV_OPA_TRANSP, 0);
+    }
+
+    lv_label_set_text(s_adv_addr_label, text);
+    lv_obj_set_width(s_adv_addr_label, box_w);
+    lv_obj_align(s_adv_addr_label, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_move_foreground(s_adv_addr_box);
+    lvgl_unlock();
 }
 
 lv_obj_t *disp_render_text(const char *text, int x, int y, lv_align_t lvalign, uint8_t size_pct, uint32_t color)

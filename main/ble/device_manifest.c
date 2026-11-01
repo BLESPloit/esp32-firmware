@@ -202,7 +202,8 @@ device_paths_t *manifest_resolve(const char *device_id) {
                 p->peripheral->entry     = join_path(base, dup_str(cJSON_GetObjectItem(periph, "entry")));
                 p->peripheral->interface = join_path(base, dup_str(cJSON_GetObjectItem(periph, "interface")));
                 cJSON *show_addr = cJSON_GetObjectItem(periph, "show_adv_address");
-                p->peripheral->show_adv_address = cJSON_IsTrue(show_addr);
+                // By default show the advertising address on LVGL display. Only JSON false hides it.
+                p->peripheral->show_adv_address = !cJSON_IsFalse(show_addr);
                 parse_observe(p->peripheral, periph);
             }
         }
